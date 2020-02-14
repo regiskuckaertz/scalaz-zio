@@ -238,7 +238,7 @@ object ZManagedSpec extends ZIOBaseSpec {
       testM("Runs onFailure on failure") {
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = Managed.fromEffect(IO.failNow(())).foldM(_ => res(1), _ => Managed.unit)
           values  <- program.use_(ZIO.unit).ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 1)))
@@ -247,7 +247,7 @@ object ZManagedSpec extends ZIOBaseSpec {
         import zio.CanFail.canFail
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = ZManaged.succeedNow(()).foldM(_ => Managed.unit, _ => res(1))
           values  <- program.use_(ZIO.unit).ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 1)))
@@ -255,7 +255,7 @@ object ZManagedSpec extends ZIOBaseSpec {
       testM("Invokes cleanups") {
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = res(1).flatMap(_ => ZManaged.failNow(())).foldM(_ => res(2), _ => res(3))
           values  <- program.use_(ZIO.unit).ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 2, 2, 1)))
@@ -264,7 +264,7 @@ object ZManagedSpec extends ZIOBaseSpec {
         import zio.CanFail.canFail
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = res(1).flatMap(_ => ZManaged.interrupt).foldM(_ => res(2), _ => res(3))
           values  <- program.use_(ZIO.unit).sandbox.ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 1)))
@@ -272,7 +272,7 @@ object ZManagedSpec extends ZIOBaseSpec {
       testM("Invokes cleanups on interrupt - 2") {
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = res(1).flatMap(_ => ZManaged.failNow(())).foldM(_ => res(2), _ => res(3))
           values  <- program.use_(ZIO.interrupt).sandbox.ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 2, 2, 1)))
@@ -280,7 +280,7 @@ object ZManagedSpec extends ZIOBaseSpec {
       testM("Invokes cleanups on interrupt - 3") {
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => Managed.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = res(1).flatMap(_ => ZManaged.failNow(())).foldM(_ => res(2) *> ZManaged.interrupt, _ => res(3))
           values  <- program.use_(ZIO.unit).sandbox.ignore *> effects.get
         } yield assert(values)(equalTo(List(1, 2, 2, 1)))
@@ -300,10 +300,29 @@ object ZManagedSpec extends ZIOBaseSpec {
       testM("Invokes cleanups in reverse order of acquisition") {
         for {
           effects <- Ref.make[List[Int]](Nil)
-          res     = (x: Int) => ZManaged.make(effects.update(x :: _).unit)(_ => effects.update(x :: _))
+          res     = (x: Int) => ZManaged.make(effects.update(x :: _))(_ => effects.update(x :: _))
           program = ZManaged.foreach(List(1, 2, 3))(res)
           values  <- program.use_(ZIO.unit) *> effects.get
         } yield assert(values)(equalTo(List(1, 2, 3, 3, 2, 1)))
+      }
+    ),
+    suite("foreach for Option")(
+      testM("Returns elements if Some") {
+        def res(int: Int) =
+          ZManaged.succeed(int)
+
+        val managed = ZManaged.foreach(Some(3))(res)
+        managed.use[Any, Nothing, TestResult](res => ZIO.succeed(assert(res)(equalTo(Some(3)))))
+      },
+      testM("Returns nothing if None") {
+        def res(int: Int) =
+          ZManaged.succeed(int)
+
+        val managed = ZManaged.foreach(None)(res)
+        managed.use[Any, Nothing, TestResult](res => ZIO.succeed(assert(res)(equalTo(None))))
+      },
+      testM("Runs finalizers") {
+        testFinalizersPar(1, res => ZManaged.foreach(Some(4))(_ => res))
       }
     ),
     suite("foreachPar")(
@@ -409,11 +428,33 @@ object ZManagedSpec extends ZIOBaseSpec {
           runtime <- ZIO.runtime[Any]
           effects <- Ref.make(List[String]())
           closeable = UIO(new AutoCloseable {
-            def close(): Unit = runtime.unsafeRun(effects.update("Closed" :: _).unit)
+            def close(): Unit = runtime.unsafeRun(effects.update("Closed" :: _))
           })
           _      <- ZManaged.fromAutoCloseable(closeable).use_(ZIO.unit)
           result <- effects.get
         } yield assert(result)(equalTo(List("Closed")))
+      }
+    ),
+    suite("ifM")(
+      testM("runs `onTrue` if result of `b` is `true`") {
+        val managed = ZManaged.ifM(ZManaged.succeedNow(true))(ZManaged.succeedNow(true), ZManaged.succeedNow(false))
+        assertM(managed.use(ZIO.succeedNow))(isTrue)
+      },
+      testM("runs `onFalse` if result of `b` is `false`") {
+        val managed = ZManaged.ifM(ZManaged.succeedNow(false))(ZManaged.succeedNow(true), ZManaged.succeedNow(false))
+        assertM(managed.use(ZIO.succeedNow))(isFalse)
+      },
+      testM("infers correctly") {
+        trait R
+        trait R1 extends R
+        trait E1
+        trait E extends E1
+        trait A
+        val b: ZManaged[R, E, Boolean]   = ZManaged.succeedNow(true)
+        val onTrue: ZManaged[R1, E1, A]  = ZManaged.succeedNow(new A {})
+        val onFalse: ZManaged[R1, E1, A] = ZManaged.succeedNow(new A {})
+        val _                            = ZManaged.ifM(b)(onTrue, onFalse)
+        ZIO.succeed(assertCompletes)
       }
     ),
     suite("mergeAll")(
@@ -508,6 +549,28 @@ object ZManagedSpec extends ZIOBaseSpec {
           finalizers <- finalizersRef.get
           result     <- resultRef.get
         } yield assert(finalizers)(equalTo(List("First", "Second"))) && assert(result)(isSome(succeeds(equalTo("42"))))
+      }
+    ),
+    suite("orElseFail")(
+      testM("executes this effect and returns its value if it succeeds") {
+        import zio.CanFail.canFail
+        val managed = ZManaged.succeedNow(true).orElseFail(false)
+        assertM(managed.use(ZIO.succeedNow))(isTrue)
+      },
+      testM("otherwise fails with the specified error") {
+        val managed = ZManaged.failNow(false).orElseFail(true).flip
+        assertM(managed.use(ZIO.succeedNow))(isTrue)
+      }
+    ),
+    suite("orElseSucceed")(
+      testM("executes this effect and returns its value if it succeeds") {
+        import zio.CanFail.canFail
+        val managed = ZManaged.succeedNow(true).orElseSucceed(false)
+        assertM(managed.use(ZIO.succeedNow))(isTrue)
+      },
+      testM("otherwise succeeds with the specified value") {
+        val managed = ZManaged.failNow(false).orElseSucceed(true)
+        assertM(managed.use(ZIO.succeedNow))(isTrue)
       }
     ),
     suite("preallocate")(
@@ -672,7 +735,7 @@ object ZManagedSpec extends ZIOBaseSpec {
         for {
           retries <- Ref.make(0)
           program = ZManaged
-            .make(retries.update(_ + 1).flatMap(r => if (r == 3) ZIO.unit else ZIO.failNow(())))(_ => ZIO.unit)
+            .make(retries.updateAndGet(_ + 1).flatMap(r => if (r == 3) ZIO.unit else ZIO.failNow(())))(_ => ZIO.unit)
           _ <- program.retry(Schedule.recurs(3)).use(_ => ZIO.unit).ignore
           r <- retries.get
         } yield assert(r)(equalTo(3))
@@ -681,7 +744,10 @@ object ZManagedSpec extends ZIOBaseSpec {
         for {
           retries <- Ref.make(0)
           program = Managed.reserve(
-            Reservation(retries.update(_ + 1).flatMap(r => if (r == 3) ZIO.unit else ZIO.failNow(())), _ => ZIO.unit)
+            Reservation(
+              retries.updateAndGet(_ + 1).flatMap(r => if (r == 3) ZIO.unit else ZIO.failNow(())),
+              _ => ZIO.unit
+            )
           )
           _ <- program.retry(Schedule.recurs(3)).use(_ => ZIO.unit).ignore
           r <- retries.get
@@ -692,12 +758,12 @@ object ZManagedSpec extends ZIOBaseSpec {
           retries1 <- Ref.make(0)
           retries2 <- Ref.make(0)
           program = ZManaged {
-            retries1.update(_ + 1).flatMap { r1 =>
+            retries1.updateAndGet(_ + 1).flatMap { r1 =>
               if (r1 < 3) ZIO.failNow(())
               else
                 ZIO.succeedNow {
                   Reservation(
-                    retries2.update(_ + 1).flatMap(r2 => if (r2 == 3) ZIO.unit else ZIO.failNow(())),
+                    retries2.updateAndGet(_ + 1).flatMap(r2 => if (r2 == 3) ZIO.unit else ZIO.failNow(())),
                     _ => ZIO.unit
                   )
                 }
@@ -892,13 +958,13 @@ object ZManagedSpec extends ZIOBaseSpec {
       }
     ),
     suite("tapCause")(
-      testM("does not lose infomrmation") {
-        val causes = Gen.causes(Gen.anyString, Gen.throwable)
-        checkM(causes, causes) { (c1, c2) =>
-          for {
-            exit <- ZManaged.haltNow(c1).tapCause(_ => ZManaged.haltNow(c2)).use(ZIO.succeedNow).run
-          } yield assert(exit)(failsCause(equalTo(Cause.Then(c1, c2))))
-        }
+      testM("effectually peeks at the cause of the failure of the acquired resource") {
+        (for {
+          ref    <- Ref.make(false).toManaged_
+          result <- ZManaged.dieMessage("die").tapCause(_ => ref.set(true).toManaged_).run
+          effect <- ref.get.toManaged_
+        } yield assert(result)(dies(hasMessage(equalTo("die")))) &&
+          assert(effect)(isTrue)).use(ZIO.succeedNow)
       }
     ),
     suite("tapError")(

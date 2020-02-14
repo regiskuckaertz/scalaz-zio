@@ -19,10 +19,10 @@ package zio
 private[zio] object ScalaSpecific {
   import scala.reflect.runtime.universe._
 
-  type Tagged[A] = TypeTag[A]
-  type TagType   = Type
+  type TaggedType[A] = TypeTag[A]
+  type TagType       = Type
 
-  private[zio] def taggedTagType[A](t: Tagged[A]): TagType = t.tpe.dealias
+  private[zio] def taggedTagType[A](t: Tagged[A]): TagType = t.tag.tpe.dealias
 
   private[zio] def taggedIsSubtype(left: TagType, right: TagType): Boolean =
     left <:< right

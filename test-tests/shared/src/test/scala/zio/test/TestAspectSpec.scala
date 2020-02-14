@@ -109,7 +109,7 @@ object TestAspectSpec extends ZIOBaseSpec {
       for {
         ref <- Ref.make(0)
         spec = testM("flaky test") {
-          assertM(ref.update(_ + 1))(equalTo(100))
+          assertM(ref.updateAndGet(_ + 1))(equalTo(100))
         } @@ flaky
         result <- isSuccess(spec)
         n      <- ref.get
@@ -119,7 +119,7 @@ object TestAspectSpec extends ZIOBaseSpec {
       for {
         ref <- Ref.make(0)
         spec = testM("flaky test that dies") {
-          assertM(ref.update(_ + 1).filterOrDieMessage(_ >= 100)("die"))(equalTo(100))
+          assertM(ref.updateAndGet(_ + 1).filterOrDieMessage(_ >= 100)("die"))(equalTo(100))
         } @@ flaky
         result <- isSuccess(spec)
         n      <- ref.get
@@ -199,7 +199,7 @@ object TestAspectSpec extends ZIOBaseSpec {
       for {
         ref <- Ref.make(0)
         spec = testM("retry") {
-          assertM(ref.update(_ + 1))(equalTo(2))
+          assertM(ref.updateAndGet(_ + 1))(equalTo(2))
         } @@ retry(Schedule.recurs(1))
         result <- isSuccess(spec)
       } yield assert(result)(isTrue)
@@ -232,6 +232,16 @@ object TestAspectSpec extends ZIOBaseSpec {
         } @@ timeout(10.milliseconds, 1.nanosecond) @@ failure(diesWith(equalTo(interruptionTimeoutFailure)))
         result <- isSuccess(spec.provideLayer(liveClock))
       } yield assert(result)(isTrue)
+    } @@ flaky,
+    testM("verify verifies the specified post-condition after each test is run") {
+      for {
+        ref <- Ref.make(false)
+        spec = suite("verify")(
+          testM("first test")(ZIO.succeedNow(assertCompletes)),
+          testM("second test")(ref.set(true).as(assertCompletes))
+        ) @@ sequential @@ verify(assertM(ref.get)(isTrue))
+        result <- isSuccess(spec)
+      } yield assert(result)(isFalse)
     }
   )
 

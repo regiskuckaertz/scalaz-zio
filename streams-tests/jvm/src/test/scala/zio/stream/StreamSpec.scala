@@ -1028,6 +1028,9 @@ object StreamSpec extends ZIOBaseSpec {
     testM("Stream.fromIterable")(checkM(Gen.small(Gen.listOfN(_)(Gen.anyInt))) { l =>
       assertM(Stream.fromIterable(l).runCollect)(equalTo(l))
     }),
+    testM("Stream.fromIterableM")(checkM(Gen.small(Gen.listOfN(_)(Gen.anyInt))) { l =>
+      assertM(Stream.fromIterableM(UIO.effectTotal(l)).runCollect)(equalTo(l))
+    }),
     testM("Stream.fromIterator")(checkM(Gen.small(Gen.listOfN(_)(Gen.anyInt))) { l =>
       assertM(Stream.fromIterator(UIO.effectTotal(l.iterator)).runCollect)(equalTo(l))
     }),
@@ -1348,7 +1351,7 @@ object StreamSpec extends ZIOBaseSpec {
         for {
           ref <- Ref.make(0)
           fa = for {
-            newCount <- ref.update(_ + 1)
+            newCount <- ref.updateAndGet(_ + 1)
             res      <- if (newCount >= 5) ZIO.failNow(None) else ZIO.succeedNow(newCount)
           } yield res
           res <- Stream
@@ -1962,6 +1965,18 @@ object StreamSpec extends ZIOBaseSpec {
                               )
                             }
       } yield assert(streamResult)(equalTo(inputStreamResult))
-    }
+    },
+    testM("Stream.toIterator, Iterators are lazy")((for {
+      counter  <- Ref.make(0).toManaged_ //Increment and get the value
+      effect   = counter.updateAndGet(_ + 1)
+      iterator <- Stream.repeatEffect(effect).toIterator
+      n        = 2000
+      out <- ZStream
+              .fromIterator(UIO(iterator.map(_.merge)))
+              .mapConcatM(element => effect.map(newElement => List(element, newElement)))
+              .take(n.toLong)
+              .runCollect
+              .toManaged_
+    } yield assert(out)(equalTo((1 to n).toList))).use(ZIO.succeedNow))
   )
 }

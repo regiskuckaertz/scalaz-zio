@@ -4,13 +4,11 @@ import scala.annotation.tailrec
 import scala.util.{ Failure, Success }
 
 import zio.Cause._
-import zio.Cause._
-import zio.LatchOps._
 import zio.LatchOps._
 import zio.clock.Clock
 import zio.duration._
+import zio.internal.Platform
 import zio.random.Random
-import zio.scheduler.Scheduler
 import zio.test.Assertion._
 import zio.test.TestAspect.{ flaky, jvm, nonFlaky, scala2Only }
 import zio.test._
@@ -123,7 +121,7 @@ object ZIOSpec extends ZIOBaseSpec {
     ),
     suite("cached")(
       testM("returns new instances after duration") {
-        def incrementAndGet(ref: Ref[Int]): UIO[Int] = ref.update(_ + 1)
+        def incrementAndGet(ref: Ref[Int]): UIO[Int] = ref.updateAndGet(_ + 1)
         for {
           ref   <- Ref.make(0)
           cache <- incrementAndGet(ref).cached(60.minutes)
@@ -138,6 +136,16 @@ object ZIOSpec extends ZIOBaseSpec {
           _     <- clock.sleep(1.minute)
           d     <- cache
         } yield assert(a)(equalTo(b)) && assert(b)(not(equalTo(c))) && assert(c)(equalTo(d))
+      },
+      testM("correctly handled an infinite duration time to live") {
+        for {
+          ref             <- Ref.make(0)
+          getAndIncrement = ref.modify(curr => (curr, curr + 1))
+          cached          <- getAndIncrement.cached(Duration.Infinity)
+          a               <- cached
+          b               <- cached
+          c               <- cached
+        } yield assert((a, b, c))(equalTo((0, 0, 0)))
       }
     ),
     suite("catchSomeCause")(
@@ -259,7 +267,7 @@ object ZIOSpec extends ZIOBaseSpec {
         for {
           in     <- Ref.make(10)
           out    <- Ref.make(0)
-          _      <- (in.update(_ - 1) <* out.update(_ + 1)).doUntil(_ == 0)
+          _      <- (in.updateAndGet(_ - 1) <* out.update(_ + 1)).doUntil(_ == 0)
           result <- out.get
         } yield assert(result)(equalTo(10))
       },
@@ -276,7 +284,7 @@ object ZIOSpec extends ZIOBaseSpec {
         for {
           in     <- Ref.make(10)
           out    <- Ref.make(0)
-          _      <- (in.update(_ - 1) <* out.update(_ + 1)).doWhile(_ >= 0)
+          _      <- (in.updateAndGet(_ - 1) <* out.update(_ + 1)).doWhile(_ >= 0)
           result <- out.get
         } yield assert(result)(equalTo(11))
       },
@@ -455,6 +463,22 @@ object ZIOSpec extends ZIOBaseSpec {
         } yield assert(sum)(equalTo(30))
       }
     ),
+    suite("foreach for Option")(
+      testM("succeeds with None given None") {
+        val task: UIO[Option[Int]] = IO.foreach(None)((str: String) => IO.succeed(str.length))
+        assertM(task)(isNone)
+      },
+      testM("succeeds with Some given Some") {
+        for {
+          optRes <- IO.foreach(Some("success"))(str => IO.succeed(str.length))
+        } yield assert(optRes)(equalTo(Some(7)))
+      },
+      testM("fails if the optional effect fails") {
+        val opt = Some("h")
+        val res = IO.foreach(opt)(x => IO.effectTotal[Int](x.toInt))
+        assertM(res.run)(dies(isSubtype[NumberFormatException](anything)))
+      }
+    ),
     suite("foreachPar")(
       testM("runs single task") {
         val as = List(2)
@@ -523,10 +547,22 @@ object ZIOSpec extends ZIOBaseSpec {
         val res  = IO.foreachPar(list)(x => IO.effectTotal[Int](x.toInt))
         assertM(res)(equalTo(List(1, 2, 3)))
       },
+      testM("returns results in the same order for Chunk") {
+        val chunk = Chunk("1", "2", "3")
+        val res   = IO.foreachPar(chunk)(x => IO.effectTotal[Int](x.toInt))
+        assertM(res)(equalTo(Chunk(1, 2, 3)))
+      },
       testM("runs effects in parallel") {
         assertM(for {
           p <- Promise.make[Nothing, Unit]
           _ <- UIO.foreachPar(List(UIO.never, p.succeed(())))(a => a).fork
+          _ <- p.await
+        } yield true)(isTrue)
+      },
+      testM("runs effects in parallel for Chunk") {
+        assertM(for {
+          p <- Promise.make[Nothing, Unit]
+          _ <- UIO.foreachPar(Chunk(UIO.never, p.succeed(()), UIO.never))(a => a).fork
           _ <- p.await
         } yield true)(isTrue)
       },
@@ -555,7 +591,7 @@ object ZIOSpec extends ZIOBaseSpec {
     suite("foreachPar_")(
       testM("accumulates errors") {
         def task(started: Ref[Int], trigger: Promise[Nothing, Unit])(i: Int): IO[Int, Unit] =
-          started.update(_ + 1) >>= { count =>
+          started.updateAndGet(_ + 1) >>= { count =>
             IO.when(count == 3)(trigger.succeed(())) *> trigger.await *> IO.failNow(i)
           }
 
@@ -564,8 +600,7 @@ object ZIOSpec extends ZIOBaseSpec {
           trigger <- Promise.make[Nothing, Unit]
 
           errors <- IO
-                     .foreachPar_(1 to 3)(i => task(started, trigger)(i))
-                     .uninterruptible
+                     .foreachPar_(1 to 3)(i => task(started, trigger)(i).uninterruptible)
                      .foldCause(cause => cause.failures.toSet, _ => Set.empty[Int])
         } yield assert(errors)(equalTo(Set(1, 2, 3)))
       },
@@ -577,6 +612,15 @@ object ZIOSpec extends ZIOBaseSpec {
           rs  <- ref.get
         } yield assert(rs)(hasSize(equalTo(as.length))) &&
           assert(rs.toSet)(equalTo(as.toSet))
+      },
+      testM("runs all effects for Chunk") {
+        val as = Chunk(1, 2, 3, 4, 5)
+        for {
+          ref <- Ref.make(Seq.empty[Int])
+          _   <- ZIO.foreachPar_(as)(a => ref.update(_ :+ a))
+          rs  <- ref.get
+        } yield assert(rs)(hasSize(equalTo(as.length))) &&
+          assert(rs.toSet)(equalTo(as.toList.toSet))
       },
       testM("completes on empty input") {
         ZIO.foreachPar_(Nil)(_ => ZIO.unit).as(assertCompletes)
@@ -725,6 +769,28 @@ object ZIOSpec extends ZIOBaseSpec {
         assertM(ZIO.failNow("Fail").head.either)(isLeft(isSome(equalTo("Fail"))))
       }
     ),
+    suite("ifM")(
+      testM("runs `onTrue` if result of `b` is `true`") {
+        val zio = ZIO.ifM(ZIO.succeedNow(true))(ZIO.succeedNow(true), ZIO.succeedNow(false))
+        assertM(zio)(isTrue)
+      },
+      testM("runs `onFalse` if result of `b` is `false`") {
+        val zio = ZIO.ifM(ZIO.succeedNow(false))(ZIO.succeedNow(true), ZIO.succeedNow(false))
+        assertM(zio)(isFalse)
+      },
+      testM("infers correctly") {
+        trait R
+        trait R1 extends R
+        trait E1
+        trait E extends E1
+        trait A
+        val b: ZIO[R, E, Boolean]   = ZIO.succeedNow(true)
+        val onTrue: ZIO[R1, E1, A]  = ZIO.succeedNow(new A {})
+        val onFalse: ZIO[R1, E1, A] = ZIO.succeedNow(new A {})
+        val _                       = ZIO.ifM(b)(onTrue, onFalse)
+        ZIO.succeed(assertCompletes)
+      }
+    ),
     suite("ignore")(
       testM("return success as Unit") {
         assertM(ZIO.succeedNow(11).ignore)(equalTo(()))
@@ -734,6 +800,13 @@ object ZIOSpec extends ZIOBaseSpec {
       },
       testM("not catch throwable") {
         assertM(ZIO.dieNow(ExampleError).ignore.run)(dies(equalTo(ExampleError)))
+      }
+    ),
+    suite("iterate")(
+      testM("iterates with the specified effectual function") {
+        for {
+          result <- ZIO.iterate(100)(_ > 0)(a => ZIO.succeedNow(a - 1))
+        } yield assert(result)(equalTo(0))
       }
     ),
     suite("left")(
@@ -761,6 +834,29 @@ object ZIOSpec extends ZIOBaseSpec {
       },
       testM("on Right value") {
         assertM(ZIO.succeedNow(Right(2)).leftOrFailException.run)(fails(Assertion.anything))
+      }
+    ),
+    suite("loop")(
+      testM("loops with the specified effectual function") {
+        for {
+          ref    <- Ref.make(List.empty[Int])
+          _      <- ZIO.loop(0)(_ < 5, _ + 1)(a => ref.update(a :: _))
+          result <- ref.get.map(_.reverse)
+        } yield assert(result)(equalTo(List(0, 1, 2, 3, 4)))
+      },
+      testM("collects the results into a list") {
+        for {
+          result <- ZIO.loop(0)(_ < 5, _ + 2)(a => ZIO.succeedNow(a * 3))
+        } yield assert(result)(equalTo(List(0, 6, 12)))
+      }
+    ),
+    suite("loop_")(
+      testM("loops with the specified effectual function") {
+        for {
+          ref    <- Ref.make(List.empty[Int])
+          _      <- ZIO.loop_(0)(_ < 5, _ + 1)(a => ref.update(a :: _))
+          result <- ref.get.map(_.reverse)
+        } yield assert(result)(equalTo(List(0, 1, 2, 3, 4)))
       }
     ),
     suite("mapN")(
@@ -984,6 +1080,24 @@ object ZIOSpec extends ZIOBaseSpec {
         assertM(orElse)(equalTo(true))
       }
     ),
+    suite("orElseFail")(
+      testM("executes this effect and returns its value if it succeeds") {
+        import zio.CanFail.canFail
+        assertM(ZIO.succeedNow(true).orElseFail(false))(isTrue)
+      },
+      testM("otherwise fails with the specified error") {
+        assertM(ZIO.failNow(false).orElseFail(true).flip)(isTrue)
+      }
+    ),
+    suite("orElseSucceed")(
+      testM("executes this effect and returns its value if it succeeds") {
+        import zio.CanFail.canFail
+        assertM(ZIO.succeedNow(true).orElseSucceed(false))(isTrue)
+      },
+      testM("otherwise succeeds with the specified value") {
+        assertM(ZIO.failNow(false).orElseSucceed(true))(isTrue)
+      }
+    ),
     suite("parallelErrors")(
       testM("oneFailure") {
         for {
@@ -1076,6 +1190,14 @@ object ZIOSpec extends ZIOBaseSpec {
         } yield assert(res._1)(equalTo(List(0, 2, 4, 6, 8))) && assert(res._2)(equalTo(List(1, 3, 5, 7, 9)))
       }
     ),
+    suite("provideSomeLayer")(
+      testM("can split environment into two parts") {
+        val clockLayer: ZLayer[Any, Nothing, Clock]    = Clock.live
+        val zio: ZIO[Clock with Random, Nothing, Unit] = ZIO.unit
+        val zio2: ZIO[Random, Nothing, Unit]           = zio.provideSomeLayer[Random](clockLayer)
+        assertM(zio2)(anything)
+      }
+    ),
     suite("raceAll")(
       testM("returns first success") {
         assertM(ZIO.failNow("Fail").raceAll(List(IO.succeedNow(24))))(equalTo(24))
@@ -1134,7 +1256,7 @@ object ZIOSpec extends ZIOBaseSpec {
         for {
           in     <- Ref.make(10)
           out    <- Ref.make(0)
-          _      <- (in.update(_ - 1) <* out.update(_ + 1)).flipWith(_.retryUntil(_ == 0))
+          _      <- (in.updateAndGet(_ - 1) <* out.update(_ + 1)).flipWith(_.retryUntil(_ == 0))
           result <- out.get
         } yield assert(result)(equalTo(10))
       },
@@ -1151,7 +1273,7 @@ object ZIOSpec extends ZIOBaseSpec {
         for {
           in     <- Ref.make(10)
           out    <- Ref.make(0)
-          _      <- (in.update(_ - 1) <* out.update(_ + 1)).flipWith(_.retryWhile(_ >= 0))
+          _      <- (in.updateAndGet(_ - 1) <* out.update(_ + 1)).flipWith(_.retryWhile(_ >= 0))
           result <- out.get
         } yield assert(result)(equalTo(11))
       },
@@ -1485,7 +1607,7 @@ object ZIOSpec extends ZIOBaseSpec {
       },
       testM("timeout a long computation") {
         val io = (clock.sleep(5.seconds) *> IO.succeedNow(true)).timeout(10.millis)
-        assertM(io.provideManaged((Scheduler.live >>> Clock.live).build))(isNone)
+        assertM(io.provideLayer(Clock.live))(isNone)
       },
       testM("catchAllCause") {
         val io =
@@ -1591,7 +1713,7 @@ object ZIOSpec extends ZIOBaseSpec {
       },
       testM("bracket regression 1") {
         def makeLogger: Ref[List[String]] => String => UIO[Unit] =
-          (ref: Ref[List[String]]) => (line: String) => ref.update(_ ::: List(line)).unit
+          (ref: Ref[List[String]]) => (line: String) => ref.update(_ ::: List(line))
 
         val io =
           for {
@@ -1720,7 +1842,7 @@ object ZIOSpec extends ZIOBaseSpec {
           fork <- ZIO
                    .effectAsync[Any, Nothing, Unit] { k =>
                      runtime.unsafeRunAsync_ {
-                       step.await *> ZIO.effectTotal(k(unexpectedPlace.update(1 :: _).unit))
+                       step.await *> ZIO.effectTotal(k(unexpectedPlace.update(1 :: _)))
                      }
                    }
                    .ensuring(ZIO.effectAsync[Any, Nothing, Unit] { _ =>
@@ -1746,7 +1868,7 @@ object ZIOSpec extends ZIOBaseSpec {
           fork <- ZIO
                    .effectAsyncMaybe[Any, Nothing, Unit] { k =>
                      runtime.unsafeRunAsync_ {
-                       step.await *> ZIO.effectTotal(k(unexpectedPlace.update(1 :: _).unit))
+                       step.await *> ZIO.effectTotal(k(unexpectedPlace.update(1 :: _)))
                      }
                      Some(IO.unit)
                    }
@@ -1984,13 +2106,13 @@ object ZIOSpec extends ZIOBaseSpec {
           for {
             counter <- Ref.make(0)
             _ <- (makeChild(1) *> makeChild(2)).handleChildrenWith { fs =>
-                  fs.foldLeft(IO.unit)((acc, f) => acc *> f.interrupt.ignore *> counter.update(_ + 1).unit)
+                  fs.foldLeft(IO.unit)((acc, f) => acc *> f.interrupt.ignore *> counter.update(_ + 1))
                 }
             value <- counter.get
           } yield value
 
         assertM(Live.live(io))(equalTo(2))
-      } @@ nonFlaky(100),
+      } @@ flaky,
       testM("race of fail with success") {
         val io = IO.failNow(42).race(IO.succeedNow(24)).either
         assertM(io)(isRight(equalTo(24)))
@@ -2527,17 +2649,15 @@ object ZIOSpec extends ZIOBaseSpec {
         } yield assert(v)(equalTo(InterruptStatus.uninterruptible))
       },
       testM("executor is heritable") {
-        val io =
-          for {
-            ref  <- Ref.make(Option.empty[internal.Executor])
-            exec = internal.Executor.fromExecutionContext(100)(scala.concurrent.ExecutionContext.Implicits.global)
-            _ <- withLatch(release =>
-                  IO.descriptor.map(_.executor).flatMap(e => ref.set(Some(e)) *> release).fork.lock(exec)
-                )
-            v <- ref.get
-          } yield v.contains(exec)
-
-        assertM(io)(isTrue)
+        val executor = internal.Executor.fromExecutionContext(100) {
+          scala.concurrent.ExecutionContext.Implicits.global
+        }
+        val pool = ZIO.effectTotal(Platform.getCurrentThreadGroup)
+        val io = for {
+          parentPool <- pool
+          childPool  <- pool.fork.flatMap(_.join)
+        } yield assert(parentPool)(equalTo(childPool))
+        io.lock(executor)
       } @@ jvm(nonFlaky(100))
     ),
     suite("someOrFail")(
@@ -2554,8 +2674,8 @@ object ZIOSpec extends ZIOBaseSpec {
       testM("returns summary and value") {
         for {
           counter   <- Ref.make(0)
-          increment = counter.update(_ + 1)
-          result    <- increment.summarized((a: Int, b: Int) => (a, b))(increment)
+          increment = counter.updateAndGet(_ + 1)
+          result    <- increment.summarized(increment)((_, _))
         } yield {
           val ((start, end), value) = result
           assert(start)(equalTo(1)) &&
@@ -2565,13 +2685,13 @@ object ZIOSpec extends ZIOBaseSpec {
       }
     ),
     suite("tapCause")(
-      testM("does not lose infomrmation") {
-        val causes = Gen.causes(Gen.anyString, Gen.throwable)
-        checkM(causes, causes) { (c1, c2) =>
-          for {
-            exit <- ZIO.haltNow(c1).tapCause(_ => ZIO.halt(c2)).run
-          } yield assert(exit)(failsCause(equalTo(Cause.Then(c1, c2))))
-        }
+      testM("effectually peeks at the cause of the failure of this effect") {
+        for {
+          ref    <- Ref.make(false)
+          result <- ZIO.dieMessage("die").tapCause(_ => ref.set(true)).run
+          effect <- ref.get
+        } yield assert(result)(dies(hasMessage(equalTo("die")))) &&
+          assert(effect)(isTrue)
       }
     ),
     suite("timeoutFork")(
