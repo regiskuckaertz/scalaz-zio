@@ -83,8 +83,93 @@ sealed abstract class ZStream[-R, +E, +O](
     ZStream(self.process.map(_.map(_.flatMap(o => Chunk.fromIterable(f(o))))))
 
   /**
+   * Runs the stream and collects all of its elements in a list.
+   *
+   * Equivalent to `run(Sink.collectAll[A])`.
+   *
+   * @return an action that yields the list of elements in the stream
+   */
+  final def runCollect: ZIO[R, E, List[O]] = runQuery(ZSink.collectAll[O])
+
+  /**
+   * Runs the stream and collects all of its elements in a list.
+   *
+   * Equivalent to `run(Sink.collectAll[A])`.
+   *
+   * @return an action that yields the list of elements in the stream
+   */
+  final def runCollectManaged: ZManaged[R, E, List[O]] = runQueryManaged(ZSink.collectAll[O])
+
+  /**
+   * Runs the stream purely for its effects. Any elements emitted by
+   * the stream are discarded.
+   *
+   * @return an action that drains the stream
+   */
+  final def runDrain: ZIO[R, E, Unit] = runDrainManaged.use(UIO.succeedNow)
+
+  /**
+   * Runs the stream purely for its effects. Any elements emitted by
+   * the stream are discarded.
+   *
+   * @return a managed effect that drains the stream
+   */
+  final def runDrainManaged: ZManaged[R, E, Unit] = runQueryManaged(ZSink.drain)
+
+  /**
+   * Runs the sink on the stream to produce either the sink's internal state or an error.
+   *
+   * @tparam B the internal state of the sink
+   * @param sink the sink to run against
+   * @return the internal state of the sink after exhausting the stream
+   */
+  def runQuery[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZIO[R1, E1, B] =
+    runQueryManaged(sink).use(UIO.succeedNow)
+
+  /**
+   * Runs the sink on the stream to produce either the sink's internal state or an error.
+   *
+   * @tparam B the internal state of the sink
+   * @param sink the sink to run against
+   * @return the internal state of the sink after exhausting the stream wrapped in a managed resource
+   */
+  def runQueryManaged[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZManaged[R1, E1, B] =
+    for {
+      command <- self.process
+      control <- sink.run
+      go = {
+        def pull: ZIO[R1, E1, B] =
+          command.foldM(
+            _.fold(ZIO.failNow, _ => control.query),
+            control(_).catchAll(_.fold(ZIO.failNow, _ => ZIO.unit)) *> pull
+          )
+        pull
+      }
+      b <- go.toManaged_
+    } yield b
+
+  /**
+   * Takes the specified number of elements from this stream.
+   * @param n the number of elements to retain
+   * @return a stream with `n` or less elements
+   */
+  def take(n: Long): ZStream[R, E, O] =
+    ZStream {
+      for {
+        as      <- self.process
+        counter <- Ref.make(0L).toManaged_
+        pull = counter.get.flatMap { c =>
+          if (c >= n) Pull.end
+          else as <* counter.set(c + 1)
+        }
+       } yield pull
+     }
+
+  /**
    * Takes all elements of the stream for as long as the specified predicate
    * evaluates to `true`.
+   * @param pred Predicate function on the values produced by the stream
+   * @return a stream of values agreeing with the predicate
    */
   final def takeWhile(pred: O => Boolean): ZStream[R, E, O] =
     ZStream {
@@ -220,6 +305,23 @@ object ZStream {
 sealed abstract class ZSink[-R, +E, -I, +Z](
   override val run: ZManaged[R, Nothing, Chunk[I] => ZIO[R, Either[E, Z], Chunk[Unit]]]
 ) extends ZConduit[R, E, I, Unit, Z](run)
+
+object ZSink {
+  def apply[R, E, I, Z](run: ZManaged[R, Nothing, Chunk[I] => ZIO[R, Either[E, Z], Chunk[Unit]]]): ZSink[R, E, I, Z] =
+    new ZSink(run) {}
+
+  def collectAll[A]: ZSink[Any, Nothing, A, List[A]] =
+    ZSink {
+      Managed.fromEffect {
+        Ref.make[Chunk[A]](Chunk.empty).map { as =>
+          is => as.updateAndGet(_ ++ is) >>= (as => IO.fail(Right(as.toList)))
+        }
+      }
+    }
+
+  val drain: ZSink[Any, Nothing, Any, Nothing] =
+    ZSink(Managed.succeedNow(_ => UIO(Chunk.unit)))
+}
 
 sealed abstract class ZTransducer[-R, +E, -I, +O](
   override val run: ZManaged[R, Nothing, Chunk[I] => ZIO[R, Either[E, Nothing], Chunk[O]]]
