@@ -140,7 +140,11 @@ sealed abstract class ZStream[-R, +E, +O](
       run = {
         def go: ZIO[R1, E1, B] =
           pull.foldM(
-            _.fold(ZIO.failNow, _ => push(Chunk.empty).foldM(_.fold(IO.failNow, IO.succeedNow), _ => IO.dieMessage("This is not possible"))),
+            _.fold(
+              ZIO.failNow,
+              _ =>
+                push(Chunk.empty).foldM(_.fold(IO.failNow, IO.succeedNow), _ => IO.dieMessage("This is not possible"))
+            ),
             push(_).flip.catchAll(_ => IO.dieMessage("This is not possible")).absolve *> go
           )
         go
@@ -162,8 +166,8 @@ sealed abstract class ZStream[-R, +E, +O](
           if (c >= n) Pull.end
           else as <* counter.set(c + 1)
         }
-       } yield pull
-     }
+      } yield pull
+    }
 
   /**
    * Takes all elements of the stream for as long as the specified predicate
@@ -309,7 +313,7 @@ sealed abstract class ZSink[-R, +E, -I, +Z](
 object ZSink {
   object Push {
     def emit[A](a: A): IO[Either[Nothing, A], Nothing] = IO.fail(Right(a))
-    val next: UIO[Chunk[Unit]] = UIO(Chunk.unit)
+    val next: UIO[Chunk[Unit]]                         = UIO(Chunk.unit)
   }
 
   def apply[R, E, I, Z](run: ZManaged[R, Nothing, Chunk[I] => ZIO[R, Either[E, Z], Chunk[Unit]]]): ZSink[R, E, I, Z] =
@@ -318,13 +322,14 @@ object ZSink {
   def collectAll[A]: ZSink[Any, Nothing, A, List[A]] =
     ZSink {
       Managed.fromEffect {
-        Ref.make[Either[List[A], Chunk[A]]](Right(Chunk.empty)).map { as =>
-          is => as.modify {
+        Ref.make[Either[List[A], Chunk[A]]](Right(Chunk.empty)).map { as => is =>
+          as.modify {
             case l @ Left(as) => Push.emit(as) -> l
-            case Right(as)    => is match {
-              case Chunk.empty => val asl = as.toList; Push.emit(asl) -> Left(asl)
-              case _           => Push.next -> Right(as ++ is)
-            }
+            case Right(as) =>
+              is match {
+                case Chunk.empty => val asl = as.toList; Push.emit(asl) -> Left(asl)
+                case _           => Push.next -> Right(as ++ is)
+              }
           }.flatten
         }
       }
