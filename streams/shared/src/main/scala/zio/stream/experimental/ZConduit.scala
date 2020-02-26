@@ -145,7 +145,7 @@ sealed abstract class ZStream[-R, +E, +O](
               _ =>
                 push(Chunk.empty).foldM(_.fold(IO.failNow, IO.succeedNow), _ => IO.dieMessage("This is not possible"))
             ),
-            push(_).flip.catchAll(_ => IO.dieMessage("This is not possible")).absolve *> go
+            push(_).catchAll(_.fold(IO.failNow, _ => IO.dieMessage("This is not possible"))) *> go
           )
         go
       }
@@ -304,6 +304,13 @@ object ZStream {
    */
   def range(min: Int, max: Int): UStream[Int] =
     iterate(min)(_ + 1).takeWhile(_ < max)
+
+  private[zio] def succeedNow[A](a: A): UStream[A] =
+    ZStream(
+      Managed.fromEffect(
+        Ref.make(false).map(done => done.modify(if (_) Pull.end -> true else Pull.emit(a) -> true).flatten)
+      )
+    )
 }
 
 sealed abstract class ZSink[-R, +E, -I, +Z](
