@@ -89,7 +89,7 @@ sealed abstract class ZStream[-R, +E, +O](
    *
    * @return an action that yields the list of elements in the stream
    */
-  final def runCollect: ZIO[R, E, List[O]] = runQuery(ZSink.collectAll[O])
+  final def runCollect: ZIO[R, E, List[O]] = run(ZSink.collectAll[O])
 
   /**
    * Runs the stream and collects all of its elements in a list.
@@ -98,7 +98,7 @@ sealed abstract class ZStream[-R, +E, +O](
    *
    * @return an action that yields the list of elements in the stream
    */
-  final def runCollectManaged: ZManaged[R, E, List[O]] = runQueryManaged(ZSink.collectAll[O])
+  final def runCollectManaged: ZManaged[R, E, List[O]] = runManaged(ZSink.collectAll[O])
 
   /**
    * Runs the stream purely for its effects. Any elements emitted by
@@ -114,7 +114,7 @@ sealed abstract class ZStream[-R, +E, +O](
    *
    * @return a managed effect that drains the stream
    */
-  final def runDrainManaged: ZManaged[R, E, Unit] = runQueryManaged(ZSink.drain)
+  final def runDrainManaged: ZManaged[R, E, Unit] = runManaged(ZSink.drain)
 
   /**
    * Runs the sink on the stream to produce either the sink's internal state or an error.
@@ -123,8 +123,8 @@ sealed abstract class ZStream[-R, +E, +O](
    * @param sink the sink to run against
    * @return the internal state of the sink after exhausting the stream
    */
-  def runQuery[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZIO[R1, E1, B] =
-    runQueryManaged(sink).use(UIO.succeedNow)
+  def run[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZIO[R1, E1, B] =
+    runManaged(sink).use(UIO.succeedNow)
 
   /**
    * Runs the sink on the stream to produce either the sink's internal state or an error.
@@ -133,19 +133,19 @@ sealed abstract class ZStream[-R, +E, +O](
    * @param sink the sink to run against
    * @return the internal state of the sink after exhausting the stream wrapped in a managed resource
    */
-  def runQueryManaged[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZManaged[R1, E1, B] =
+  def runManaged[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZManaged[R1, E1, B] =
     for {
-      command <- self.process
-      control <- sink.run
-      go = {
-        def pull: ZIO[R1, E1, B] =
-          command.foldM(
-            _.fold(ZIO.failNow, _ => control.query),
-            control(_).catchAll(_.fold(ZIO.failNow, _ => ZIO.unit)) *> pull
+      pull <- self.process
+      push <- sink.run
+      run = {
+        def go: ZIO[R1, E1, B] =
+          pull.foldM(
+            _.fold(ZIO.failNow, _ => push(Chunk.empty).foldM(_.fold(IO.failNow, IO.succeedNow), _ => IO.dieMessage("This is not possible"))),
+            push(_).flip.catchAll(_ => IO.dieMessage("This is not possible")).absolve *> go
           )
-        pull
+        go
       }
-      b <- go.toManaged_
+      b <- run.toManaged_
     } yield b
 
   /**
@@ -307,14 +307,25 @@ sealed abstract class ZSink[-R, +E, -I, +Z](
 ) extends ZConduit[R, E, I, Unit, Z](run)
 
 object ZSink {
+  object Push {
+    def emit[A](a: A): IO[Either[Nothing, A], Nothing] = IO.fail(Right(a))
+    val next: UIO[Chunk[Unit]] = UIO(Chunk.unit)
+  }
+
   def apply[R, E, I, Z](run: ZManaged[R, Nothing, Chunk[I] => ZIO[R, Either[E, Z], Chunk[Unit]]]): ZSink[R, E, I, Z] =
     new ZSink(run) {}
 
   def collectAll[A]: ZSink[Any, Nothing, A, List[A]] =
     ZSink {
       Managed.fromEffect {
-        Ref.make[Chunk[A]](Chunk.empty).map { as =>
-          is => as.updateAndGet(_ ++ is) >>= (as => IO.fail(Right(as.toList)))
+        Ref.make[Either[List[A], Chunk[A]]](Right(Chunk.empty)).map { as =>
+          is => as.modify {
+            case l @ Left(as) => Push.emit(as) -> l
+            case Right(as)    => is match {
+              case Chunk.empty => val asl = as.toList; Push.emit(asl) -> Left(asl)
+              case _           => Push.next -> Right(as ++ is)
+            }
+          }.flatten
         }
       }
     }
