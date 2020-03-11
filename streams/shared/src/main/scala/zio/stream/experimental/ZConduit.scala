@@ -329,15 +329,11 @@ object ZSink {
   def collectAll[A]: ZSink[Any, Nothing, A, List[A]] =
     ZSink {
       Managed.fromEffect {
-        Ref.make[Either[List[A], Chunk[A]]](Right(Chunk.empty)).map { as => is =>
-          as.modify {
-            case l @ Left(as) => Push.emit(as) -> l
-            case Right(as) =>
-              is match {
-                case Chunk.empty => val asl = as.toList; Push.emit(asl) -> Left(asl)
-                case _           => Push.next -> Right(as ++ is)
-              }
-          }.flatten
+        Ref.make[Chunk[A]](Chunk.empty).map { as =>
+          {
+            case Chunk.empty => as.get.flatMap(as => Push.emit(as.toList))
+            case is          => as.update(_ ++ is) *> Push.next
+          }
         }
       }
     }
