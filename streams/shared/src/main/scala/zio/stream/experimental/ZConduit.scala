@@ -6,7 +6,7 @@ sealed trait Signal[+I] {
   type Emit[+O]
   type Terminate[+E, +Z]
 
-  def fold[R, E, O, Z](folder: SignalFunction[R, E, I, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]]
+  def fold[R, E, O, Z](folder: Signal.Folder[R, E, I, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]]
 }
 
 object Signal {
@@ -14,7 +14,7 @@ object Signal {
     type Emit[+O]          = Nothing
     type Terminate[+E, +Z] = Either[Option[E], Z]
 
-    def fold[R, E, O, Z](folder: SignalFunction[R, E, Nothing, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]] =
+    def fold[R, E, O, Z](folder: Signal.Folder[R, E, Nothing, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]] =
       folder.onEnd
   }
 
@@ -22,18 +22,19 @@ object Signal {
     type Emit[+O]          = Chunk[O]
     type Terminate[+E, +Z] = Either[E, Z]
 
-    def fold[R, E, O, Z](folder: SignalFunction[R, E, I, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]] =
+    def fold[R, E, O, Z](folder: Signal.Folder[R, E, I, O, Z]): ZIO[R, Terminate[E, Z], Emit[O]] =
       folder.onContinue(this)
 
+  }
+
+  trait Folder[-R, +E, -I, +O, +Z] {
+    def onEnd: ZIO[R, End.Terminate[E, Z], End.Emit[O]]
+    def onContinue[I1 <: I](cont: Continue[I1]): ZIO[R, cont.Terminate[E, Z], cont.Emit[O]]
   }
 }
 
 abstract class SignalFunction[-R, +E, -I, +O, +Z] {
-  def apply[S <: Signal[I]](signal: S): ZIO[R, signal.Terminate[E, Z], signal.Emit[O]] =
-    signal.fold(this)
-
-  def onEnd: ZIO[R, Signal.End.Terminate[E, Z], Signal.End.Emit[O]]
-  def onContinue[I1 <: I](cont: Signal.Continue[I1]): ZIO[R, cont.Terminate[E, Z], cont.Emit[O]]
+  def apply[S <: Signal[I]](signal: S): ZIO[R, signal.Terminate[E, Z], signal.Emit[O]]
 }
 
 sealed abstract class ZConduit[-R, +E, -I, +O, +Z] private[stream] (
@@ -364,10 +365,14 @@ object ZSink {
     ZSink {
       Managed.fromEffect {
         Ref.make[Chunk[A]](Chunk.empty).map { as =>
+          
           new SignalFunction[Any, Nothing, A, Unit, List[A]] {
-            val onEnd: ZIO[Any, Either[Option[Nothing], List[A]], Nothing] = as.get.map(_.toList).map(Right(_)).flip
-            def onContinue[A1 <: A](cont: Signal.Continue[A1]): ZIO[Any, Either[Nothing, List[A]], Chunk[Unit]] =
-              as.update(_ ++ cont.input) *> Push.next
+            def apply[S <: Signal[A]](signal: S): ZIO[Any, signal.Terminate[Nothing, List[A]], signal.Emit[Unit]] =
+              signal.fold(new Signal.Folder[Any, Nothing, A, Unit, List[A]] {
+                val onEnd: ZIO[Any, Either[Option[Nothing], List[A]], Nothing] = as.get.map(_.toList).map(Right(_)).flip
+                def onContinue[A1 <: A](cont: Signal.Continue[A1]): ZIO[Any, Either[Nothing, List[A]], Chunk[Unit]] =
+                  as.update(_ ++ cont.input) *> Push.next
+              })
           }
         }
       }
