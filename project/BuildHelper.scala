@@ -40,7 +40,7 @@ object BuildHelper {
     sys.props.get(property).map(_.toBoolean).getOrElse(default)
 
   private def customOptions =
-    if (propertyFlag("fatal.warnings", false)) {
+    if (propertyFlag("fatal.warnings", true)) {
       Seq("-Xfatal-warnings")
     } else {
       Nil
@@ -88,7 +88,7 @@ object BuildHelper {
       (if (isDotty.value) Seq()
        else
          Seq(
-           "io.7mind.izumi" %%% "fundamentals-reflection" % "0.10.2-M6"
+           "dev.zio" %%% "izumi-reflect" % "0.11.0-M1"
          ))
   )
 
@@ -217,12 +217,12 @@ object BuildHelper {
   def stdSettings(prjName: String) = Seq(
     name := s"$prjName",
     scalacOptions := stdOptions,
-    crossScalaVersions := Seq("2.12.10", "2.13.1", "2.11.12"),
+    crossScalaVersions := Seq("2.12.10", "2.11.12", "2.13.1"),
     scalaVersion in ThisBuild := crossScalaVersions.value.head,
     scalacOptions := stdOptions ++ extraOptions(scalaVersion.value, optimize = !isSnapshot.value),
     libraryDependencies ++= {
       if (isDotty.value)
-        Seq("com.github.ghik" % "silencer-lib_2.13.1" % "1.5.0" % Provided)
+        Seq("com.github.ghik" % "silencer-lib_2.13.1" % "1.6.0" % Provided)
       else
         Seq(
           "com.github.ghik" % "silencer-lib" % "1.4.4" % Provided cross CrossVersion.full,

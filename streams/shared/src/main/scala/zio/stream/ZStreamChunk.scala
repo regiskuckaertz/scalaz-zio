@@ -83,7 +83,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
   final def catchAll[R1 <: R, E2, A1 >: A](
     f: E => ZStreamChunk[R1, E2, A1]
   )(implicit ev: CanFail[E]): ZStreamChunk[R1, E2, A1] =
-    self.catchAllCause(_.failureOrCause.fold(f, c => ZStreamChunk(ZStream.haltNow(c))))
+    self.catchAllCause(_.failureOrCause.fold(f, c => ZStreamChunk(ZStream.halt(c))))
 
   /**
    * Switches over to the stream produced by the provided function in case this one
@@ -114,7 +114,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
                     {
                       case None if chunk0.length == 0 => Pull.end
                       case None                       => Pull.emitNow(chunk0) <* state.set(true -> Chunk.empty)
-                      case e @ Some(_)                => ZIO.failNow(e)
+                      case e @ Some(_)                => ZIO.fail(e)
                     },
                     xs =>
                       state.modify {
@@ -302,9 +302,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
    */
   final def foldM[R1 <: R, E1 >: E, A1 >: A, S](s: S)(f: (S, A1) => ZIO[R1, E1, S]): ZIO[R1, E1, S] =
     chunks
-      .foldWhileManagedM[R1, E1, Chunk[A1], S](s)(_ => true) { (s, as) =>
-        as.foldM(s)(f)
-      }
+      .foldWhileManagedM[R1, E1, Chunk[A1], S](s)(_ => true)((s, as) => as.foldM(s)(f))
       .use(ZIO.succeedNow)
 
   /**
@@ -324,9 +322,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
    * See [[ZStream.foldManagedM]]
    */
   final def foldManagedM[R1 <: R, E1 >: E, A1 >: A, S](s: S)(f: (S, A1) => ZIO[R1, E1, S]): ZManaged[R1, E1, S] =
-    chunks.foldWhileManagedM[R1, E1, Chunk[A1], S](s)(_ => true) { (s, as) =>
-      as.foldM(s)(f)
-    }
+    chunks.foldWhileManagedM[R1, E1, Chunk[A1], S](s)(_ => true)((s, as) => as.foldM(s)(f))
 
   /**
    * Reduces the elements in the stream to a value of type `S`.
@@ -349,9 +345,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
     s: S
   )(cont: S => Boolean)(f: (S, A1) => ZIO[R1, E1, S]): ZIO[R1, E1, S] =
     chunks
-      .foldWhileManagedM[R1, E1, Chunk[A1], S](s)(cont) { (s, as) =>
-        as.foldWhileM(s)(cont)(f)
-      }
+      .foldWhileManagedM[R1, E1, Chunk[A1], S](s)(cont)((s, as) => as.foldWhileM(s)(cont)(f))
       .use(ZIO.succeedNow)
 
   /**
@@ -372,9 +366,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
   final def foldWhileManagedM[R1 <: R, E1 >: E, A1 >: A, S](
     s: S
   )(cont: S => Boolean)(f: (S, A1) => ZIO[R1, E1, S]): ZManaged[R1, E1, S] =
-    chunks.foldWhileManagedM[R1, E1, Chunk[A1], S](s)(cont) { (s, as) =>
-      as.foldWhileM(s)(cont)(f)
-    }
+    chunks.foldWhileManagedM[R1, E1, Chunk[A1], S](s)(cont)((s, as) => as.foldWhileM(s)(cont)(f))
 
   /**
    * Consumes all elements of the stream, passing them to the specified callback.
@@ -480,9 +472,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
             indexRef.get.flatMap { index =>
               if (index < chunk.length) indexRef.set(index + 1).as(chunk(index))
               else
-                chunks.flatMap { chunk =>
-                  chunkRef.set(chunk) *> indexRef.set(0) *> go
-                }
+                chunks.flatMap(chunk => chunkRef.set(chunk) *> indexRef.set(0) *> go)
             }
           }
 
@@ -498,41 +488,11 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
     provideSome(_ => r)
 
   /**
-   * An effectful version of `provide`, useful when the act of provision
-   * requires an effect.
-   */
-  final def provideM[E1 >: E](r: IO[E1, R])(implicit ev: NeedsEnv[R]): StreamChunk[E1, A] =
-    provideSomeM(r)
-
-  /**
-   * Uses the given [[Managed]] to provide the environment required to run this stream,
-   * leaving no outstanding environments.
-   */
-  final def provideManaged[E1 >: E](m: Managed[E1, R])(implicit ev: NeedsEnv[R]): StreamChunk[E1, A] =
-    provideSomeManaged(m)
-
-  /**
    * Provides some of the environment required to run this effect,
    * leaving the remainder `R0`.
    */
   final def provideSome[R0](env: R0 => R)(implicit ev: NeedsEnv[R]): ZStreamChunk[R0, E, A] =
     ZStreamChunk(chunks.provideSome(env))
-
-  /**
-   * Effectfully provides some of the environment required to run this effect
-   * leaving the remainder `R0`.
-   */
-  final def provideSomeM[R0, E1 >: E](env: ZIO[R0, E1, R])(implicit ev: NeedsEnv[R]): ZStreamChunk[R0, E1, A] =
-    ZStreamChunk(chunks.provideSomeM(env))
-
-  /**
-   * Uses the given [[Managed]] to provide some of the environment required to run
-   * this stream, leaving the remainder `R0`.
-   */
-  final def provideSomeManaged[R0, E1 >: E](
-    env: ZManaged[R0, E1, R]
-  )(implicit ev: NeedsEnv[R]): ZStreamChunk[R0, E1, A] =
-    ZStreamChunk(chunks.provideSomeManaged(env))
 
   /**
    * Runs the sink on the stream to produce either the sink's result or an error.
@@ -624,9 +584,7 @@ class ZStreamChunk[-R, +E, +A](val chunks: ZStream[R, E, Chunk[A]]) extends Seri
    * Adds an effect to consumption of every element of the stream.
    */
   final def tap[R1 <: R, E1 >: E](f0: A => ZIO[R1, E1, Any]): ZStreamChunk[R1, E1, A] =
-    ZStreamChunk(chunks.tap[R1, E1] { as =>
-      as.mapM_(f0)
-    })
+    ZStreamChunk(chunks.tap[R1, E1](as => as.mapM_(f0)))
 
   @silent("never used")
   def toInputStream(implicit ev0: E <:< Throwable, ev1: A <:< Byte): ZManaged[R, E, java.io.InputStream] =
@@ -703,13 +661,13 @@ object ZStreamChunk {
     new StreamEffectChunk(StreamEffect.fromIterable(as))
 
   /**
-   * Creates a `ZStreamChunk` from an eagerly evaluated chunk
+   * Creates a `ZStreamChunk` from a lazily evaluated chunk
    */
   def succeed[A](as: => Chunk[A]): StreamChunk[Nothing, A] =
     new StreamEffectChunk(StreamEffect.succeed(as))
 
   /**
-   * Creates a `ZStreamChunk` from a lazily evaluated chunk
+   * Creates a `ZStreamChunk` from an eagerly evaluated chunk
    */
   private[zio] def succeedNow[A](as: Chunk[A]): StreamChunk[Nothing, A] =
     succeed(as)

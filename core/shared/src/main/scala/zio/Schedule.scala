@@ -235,7 +235,7 @@ trait Schedule[-R, -A, +B] extends Serializable { self =>
     updated(update =>
       (a, s) =>
         test(a, self.extract(a, s)).flatMap {
-          case false => ZIO.failNow(())
+          case false => ZIO.fail(())
           case true  => update(a, s)
         }
     )
@@ -553,7 +553,7 @@ trait Schedule[-R, -A, +B] extends Serializable { self =>
     updated(update =>
       (a, s) =>
         f(a).flatMap {
-          case true  => ZIO.failNow(())
+          case true  => ZIO.fail(())
           case false => update(a, s)
         }
     )
@@ -572,7 +572,7 @@ trait Schedule[-R, -A, +B] extends Serializable { self =>
     updated(update =>
       (a, s) =>
         f(self.extract(a, s)).flatMap {
-          case true  => ZIO.failNow(())
+          case true  => ZIO.fail(())
           case false => update(a, s)
         }
     )
@@ -718,7 +718,7 @@ object Schedule {
       type State = Unit
       val initial = ZIO.unit
       val extract = (a: A, _: Unit) => pf.lift(a)
-      val update  = (a: A, _: Unit) => pf.lift(a).fold[IO[Unit, Unit]](ZIO.succeedNow(()))(_ => ZIO.failNow(()))
+      val update  = (a: A, _: Unit) => pf.lift(a).fold[IO[Unit, Unit]](ZIO.succeedNow(()))(_ => ZIO.fail(()))
     }
 
   /**
@@ -745,7 +745,7 @@ object Schedule {
    * repetitions so far. Returns the current duration between recurrences.
    */
   def exponential(base: Duration, factor: Double = 2.0): Schedule[Clock, Any, Duration] =
-    delayed(forever.map(i => base * math.pow(factor, (i + 1).doubleValue)))
+    delayed(forever.map(i => base * math.pow(factor, i.doubleValue)))
 
   /**
    * A schedule that always recurs, increasing delays by summing the

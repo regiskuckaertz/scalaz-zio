@@ -29,9 +29,9 @@ private[test] trait PlatformSpecific {
     val live: ZLayer[ZEnv, Nothing, TestEnvironment] =
       Annotations.live ++
         (Live.default >>> TestClock.default) ++
-        TestConsole.default ++
+        (Live.default >>> TestConsole.debug) ++
         Live.default ++
-        TestRandom.random ++
+        TestRandom.deterministic ++
         Sized.live(100) ++
         TestSystem.default
   }

@@ -16,18 +16,16 @@
 
 package zio
 
-import zio.internal.Platform
+final case class Tagged[A](tag: TaggedType[A]) {
+  override def equals(that: Any): Boolean = that match {
+    case Tagged(that) => tag.tag == that.tag
+    case _            => false
+  }
+  override def hashCode: Int    = tag.tag.hashCode
+  override def toString: String = tag.tag.toString
+}
 
-@deprecated(
-  "Use `Runtime.default` and provide the required environment directly using" +
-    "`ZIO#provideLayer`. In general, layers are managed resources that " +
-    "require allocation and deallocation and therefore scoping resources to" +
-    "an effect is highly recommended as a best practice. " +
-    "`Runtime.unsafefromLayer` can be used when this best practice is is too " +
-    "inconvenient.",
-  "1.0.0"
-)
-trait DefaultRuntime extends Runtime[ZEnv] {
-  override val platform: Platform = Platform.default
-  override val environment: ZEnv  = Runtime.unsafeFromLayer(ZEnv.live, platform).environment
+object Tagged {
+  implicit def tagged[A](implicit tag: TaggedType[A]): Tagged[A] =
+    Tagged(tag)
 }

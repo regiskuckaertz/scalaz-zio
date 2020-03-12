@@ -26,6 +26,11 @@ object RIO {
   def apply[A](a: => A): Task[A] = ZIO.apply(a)
 
   /**
+   * @see See [[zio.ZIO.awaitAllChildren]]
+   */
+  val awaitAllChildren = ZIO.awaitAllChildren
+
+  /**
    * @see See [[zio.ZIO.access]]
    */
   def access[R]: ZIO.AccessPartiallyApplied[R] =
@@ -67,12 +72,6 @@ object RIO {
     use: A => RIO[R, B]
   ): RIO[R, B] =
     ZIO.bracketExit(acquire, release, use)
-
-  /**
-   * @see See [[zio.ZIO.checkDaemon]]
-   */
-  def checkDaemon[R, A](f: DaemonStatus => RIO[R, A]): RIO[R, A] =
-    ZIO.checkDaemon(f)
 
   /**
    * @see See [[zio.ZIO.checkInterruptible]]
@@ -146,12 +145,6 @@ object RIO {
     ZIO.collectAllWithParN(n)(as)(f)
 
   /**
-   * @see See [[zio.ZIO.daemonMask]]
-   */
-  def daemonMask[R, A](k: ZIO.DaemonStatusRestore => RIO[R, A]): RIO[R, A] =
-    ZIO.daemonMask(k)
-
-  /**
    * @see See [[zio.ZIO.descriptor]]
    */
   def descriptor: UIO[Fiber.Descriptor] = ZIO.descriptor
@@ -171,6 +164,11 @@ object RIO {
    * @see See [[zio.ZIO.dieMessage]]
    */
   def dieMessage(message: => String): UIO[Nothing] = ZIO.dieMessage(message)
+
+  /**
+   * @see See [[zio.ZIO.disown]]
+   */
+  def disown(fiber: Fiber[Any, Any]): UIO[Boolean] = ZIO.disown(fiber)
 
   /**
    * @see See [[zio.ZIO.done]]
@@ -361,7 +359,7 @@ object RIO {
   /**
    * @see See [[zio.ZIO.forkAll]]
    */
-  def forkAll[R, A](as: Iterable[RIO[R, A]]): ZIO[R, Nothing, Fiber.Synthetic[Throwable, List[A]]] =
+  def forkAll[R, A](as: Iterable[RIO[R, A]]): ZIO[R, Nothing, Fiber[Throwable, List[A]]] =
     ZIO.forkAll(as)
 
   /**
@@ -418,13 +416,16 @@ object RIO {
   def fromFutureInterrupt[A](make: ExecutionContext => scala.concurrent.Future[A]): Task[A] =
     ZIO.fromFutureInterrupt(make)
 
-  def fromOption[A](v: => Option[A]): IO[Unit, A] = ZIO.fromOption(v)
-
   /**
    * @see See [[zio.ZIO.fromTry]]
    */
   def fromTry[A](value: => scala.util.Try[A]): Task[A] =
     ZIO.fromTry(value)
+
+  /**
+   * @see See [[zio.ZIO.getOrFail]]
+   */
+  final def getOrFail[A](v: => Option[A]): Task[A] = ZIO.getOrFail(v)
 
   /**
    * @see See [[zio.ZIO.halt]]
@@ -449,9 +450,19 @@ object RIO {
     new ZIO.IfM(b)
 
   /**
+   * @see [[zio.ZIO.infinity]]
+   */
+  val infinity: URIO[Clock, Nothing] = ZIO.sleep(Duration.fromNanos(Long.MaxValue)) *> ZIO.never
+
+  /**
    * @see See [[zio.ZIO.interrupt]]
    */
   val interrupt: UIO[Nothing] = ZIO.interrupt
+
+  /**
+   * @see See [zio.ZIO.interruptAllChildren]
+   */
+  def interruptAllChildren: UIO[Unit] = ZIO.children.flatMap(Fiber.interruptAll(_))
 
   /**
    * @see See [[zio.ZIO.interruptAs]]
@@ -559,12 +570,6 @@ object RIO {
   val never: UIO[Nothing] = ZIO.never
 
   /**
-   * @see See [[zio.ZIO.nonDaemonMask]]
-   */
-  def nonDaemonMask[R, A](k: ZIO.DaemonStatusRestore => RIO[R, A]): RIO[R, A] =
-    ZIO.nonDaemonMask(k)
-
-  /**
    * @see See [[zio.ZIO.none]]
    */
   val none: UIO[Option[Nothing]] = ZIO.none
@@ -663,27 +668,6 @@ object RIO {
   def succeed[A](a: => A): UIO[A] = ZIO.succeed(a)
 
   /**
-   *  See [[zio.ZIO.sequence]]
-   */
-  @deprecated("use collectAll", "1.0.0")
-  def sequence[R, A](in: Iterable[RIO[R, A]]): RIO[R, List[A]] =
-    ZIO.sequence(in)
-
-  /**
-   *  See [[zio.ZIO.sequencePar]]
-   */
-  @deprecated("use collectAllPar", "1.0.0")
-  def sequencePar[R, A](as: Iterable[RIO[R, A]]): RIO[R, List[A]] =
-    ZIO.sequencePar(as)
-
-  /**
-   *  See [[zio.ZIO.sequenceParN]]
-   */
-  @deprecated("use collectAllParN", "1.0.0")
-  def sequenceParN[R, A](n: Int)(as: Iterable[RIO[R, A]]): RIO[R, List[A]] =
-    ZIO.sequenceParN(n)(as)
-
-  /**
    * @see See [[zio.ZIO.swap]]
    */
   def swap[A, B]: RIO[(A, B), (B, A)] =
@@ -698,52 +682,6 @@ object RIO {
    * @see See [[zio.ZIO.traced]]
    */
   def traced[R, A](zio: RIO[R, A]): RIO[R, A] = ZIO.traced(zio)
-
-  /**
-   * @see See [[zio.ZIO.traverse]]
-   */
-  @deprecated("use foreach", "1.0.0")
-  def traverse[R, A, B](in: Iterable[A])(f: A => RIO[R, B]): RIO[R, List[B]] =
-    ZIO.traverse(in)(f)
-
-  /**
-   * @see See [[zio.ZIO.traversePar]]
-   */
-  @deprecated("use foreachPar", "1.0.0")
-  def traversePar[R, A, B](as: Iterable[A])(fn: A => RIO[R, B]): RIO[R, List[B]] =
-    ZIO.traversePar(as)(fn)
-
-  /**
-   * Alias for [[ZIO.foreachParN]]
-   */
-  @deprecated("use foreachParN", "1.0.0")
-  def traverseParN[R, A, B](
-    n: Int
-  )(as: Iterable[A])(fn: A => RIO[R, B]): RIO[R, List[B]] =
-    ZIO.traverseParN(n)(as)(fn)
-
-  /**
-   * @see See [[zio.ZIO.traverse_]]
-   */
-  @deprecated("use foreach_", "1.0.0")
-  def traverse_[R, A](as: Iterable[A])(f: A => RIO[R, Any]): RIO[R, Unit] =
-    ZIO.traverse_(as)(f)
-
-  /**
-   * @see See [[zio.ZIO.traversePar_]]
-   */
-  @deprecated("use foreachPar_", "1.0.0")
-  def traversePar_[R, A](as: Iterable[A])(f: A => RIO[R, Any]): RIO[R, Unit] =
-    ZIO.traversePar_(as)(f)
-
-  /**
-   * @see See [[zio.ZIO.traverseParN_]]
-   */
-  @deprecated("use foreachParN_", "1.0.0")
-  def traverseParN_[R, A](
-    n: Int
-  )(as: Iterable[A])(f: A => RIO[R, Any]): RIO[R, Unit] =
-    ZIO.traverseParN_(n)(as)(f)
 
   /**
    * @see See [[zio.ZIO.unit]]
@@ -800,14 +738,6 @@ object RIO {
    * @see See [[zio.ZIO.yieldNow]]
    */
   val yieldNow: UIO[Unit] = ZIO.yieldNow
-
-  private[zio] def dieNow(t: Throwable): UIO[Nothing] = ZIO.dieNow(t)
-
-  private[zio] def doneNow[A](r: Exit[Throwable, A]): Task[A] = ZIO.doneNow(r)
-
-  private[zio] def failNow(error: Throwable): Task[Nothing] = ZIO.failNow(error)
-
-  private[zio] def haltNow(cause: Cause[Throwable]): Task[Nothing] = ZIO.haltNow(cause)
 
   private[zio] def succeedNow[A](a: A): UIO[A] = ZIO.succeedNow(a)
 }

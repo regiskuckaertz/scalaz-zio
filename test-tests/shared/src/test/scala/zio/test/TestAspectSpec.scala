@@ -1,15 +1,12 @@
 package zio.test
 
 import scala.reflect.ClassTag
-import scala.reflect.ClassTag
 
-import zio.ZEnv
-import zio.ZLayer
 import zio.duration._
 import zio.test.Assertion._
 import zio.test.TestAspect._
 import zio.test.TestUtils._
-import zio.test.environment.{ Live, TestClock }
+import zio.test.environment.TestRandom
 import zio.{ Ref, Schedule, ZIO }
 
 object TestAspectSpec extends ZIOBaseSpec {
@@ -32,7 +29,7 @@ object TestAspectSpec extends ZIOBaseSpec {
       for {
         ref <- Ref.make(0)
         spec = testM("test") {
-          ZIO.failNow("error")
+          ZIO.fail("error")
         } @@ after(ref.set(-1))
         result <- isSuccess(spec)
         after  <- ref.get
@@ -128,6 +125,12 @@ object TestAspectSpec extends ZIOBaseSpec {
     test("flaky retries a test with a limit") {
       assert(true)(isFalse)
     } @@ flaky @@ failure,
+    testM("forked runs each test on its own separate fiber") {
+      for {
+        _        <- ZIO.infinity.fork
+        children <- ZIO.children
+      } yield assert(children)(hasSize(equalTo(1)))
+    } @@ forked @@ nonFlaky,
     test("ifEnv runs a test if environment variable satisfies assertion") {
       assert(true)(isTrue)
     } @@ ifEnv("PATH", containsString("bin")) @@ success @@ jvmOnly,
@@ -184,6 +187,9 @@ object TestAspectSpec extends ZIOBaseSpec {
       val result = if (TestPlatform.isJVM) isSuccess(spec) else isIgnored(spec)
       assertM(result)(isTrue)
     },
+    testM("noDelay causes sleep effects to be executed immediately") {
+      assertM(ZIO.sleep(Duration.Infinity))(anything)
+    } @@ noDelay,
     suite("nonTermination")(
       testM("makes a test pass if it does not terminate within the specified time") {
         assertM(ZIO.never)(anything)
@@ -192,7 +198,7 @@ object TestAspectSpec extends ZIOBaseSpec {
         assertM(ZIO.unit)(anything)
       } @@ nonTermination(1.minute) @@ failure,
       testM("makes a test fail if it fails within the specified time") {
-        assertM(ZIO.failNow("fail"))(anything)
+        assertM(ZIO.fail("fail"))(anything)
       } @@ nonTermination(1.minute) @@ failure
     ),
     testM("retry retries failed tests according to a schedule") {
@@ -217,22 +223,13 @@ object TestAspectSpec extends ZIOBaseSpec {
       val result = if (TestVersion.isScala2) isSuccess(spec) else isIgnored(spec)
       assertM(result)(isTrue)
     },
+    testM("setSeed sets the random seed to the specified value before each test") {
+      assertM(TestRandom.getSeed)(equalTo(seed & ((1L << 48) - 1)))
+    } @@ setSeed(seed),
     testM("timeout makes tests fail after given duration") {
       assertM(ZIO.never *> ZIO.unit)(equalTo(()))
     } @@ timeout(1.nanos)
       @@ failure(diesWithSubtypeOf[TestTimeoutException]),
-    testM("timeout reports problem with interruption") {
-      for {
-        testClock <- ZIO.environment[TestClock].map(_.get[TestClock.Service])
-        liveClock = (ZEnv.live >>> Live.default) ++ ZLayer.succeed(testClock)
-        spec = testM("uninterruptible test") {
-          for {
-            _ <- (TestClock.adjust(11.milliseconds) *> ZIO.never).uninterruptible
-          } yield assertCompletes
-        } @@ timeout(10.milliseconds, 1.nanosecond) @@ failure(diesWith(equalTo(interruptionTimeoutFailure)))
-        result <- isSuccess(spec.provideLayer(liveClock))
-      } yield assert(result)(isTrue)
-    } @@ flaky,
     testM("verify verifies the specified post-condition after each test is run") {
       for {
         ref <- Ref.make(false)
@@ -261,4 +258,6 @@ object TestAspectSpec extends ZIOBaseSpec {
     TestTimeoutException(
       "Timeout of 10 ms exceeded. Couldn't interrupt test within 1 ns, possible resource leak!"
     )
+
+  val seed = -1157790455010312737L
 }

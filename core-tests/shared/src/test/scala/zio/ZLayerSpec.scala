@@ -11,9 +11,7 @@ object ZLayerSpec extends ZIOBaseSpec {
   trait Cat extends Animal
 
   def testSize[R <: Has[_]](layer: ZLayer.NoDeps[Nothing, R], n: Int, label: String = ""): UIO[TestResult] =
-    layer.build.use { env =>
-      ZIO.succeedNow(assert(env.size)(if (label == "") equalTo(n) else equalTo(n) ?? label))
-    }
+    layer.build.use(env => ZIO.succeedNow(assert(env.size)(if (label == "") equalTo(n) else equalTo(n) ?? label)))
 
   val acquire1 = "Acquiring Module 1"
   val acquire2 = "Acquiring Module 2"
@@ -61,21 +59,21 @@ object ZLayerSpec extends ZIOBaseSpec {
   def spec =
     suite("ZLayerSpec")(
       testM("Size of >>> (1)") {
-        val layer = ZLayer.succeed(1) >>> ZLayer.fromService((i: Int) => Has(i.toString))
+        val layer = ZLayer.succeed(1) >>> ZLayer.fromService((i: Int) => i.toString)
 
         testSize(layer, 1)
       },
       testM("Size of >>> (2)") {
         val layer = ZLayer.succeed(1) >>>
-          (ZLayer.fromService((i: Int) => Has(i.toString)) ++
-            ZLayer.fromService((i: Int) => Has(i % 2 == 0)))
+          (ZLayer.fromService((i: Int) => i.toString) ++
+            ZLayer.fromService((i: Int) => i % 2 == 0))
 
         testSize(layer, 2)
       },
       testM("Size of Test layers") {
         for {
           r1 <- testSize(Annotations.live, 1, "Annotations.live")
-          r2 <- testSize(TestConsole.default, 2, "TestConsole.default")
+          r2 <- testSize(ZEnv.live >>> Live.default >>> TestConsole.debug, 2, "TestConsole.default")
           r3 <- testSize(ZEnv.live >>> Live.default, 1, "Live.default")
           r4 <- testSize(ZEnv.live >>> TestRandom.deterministic, 2, "TestRandom.live")
           r5 <- testSize(Sized.live(100), 1, "Sized.live(100)")
@@ -84,8 +82,9 @@ object ZLayerSpec extends ZIOBaseSpec {
       },
       testM("Size of >>> (9)") {
         val layer = (ZEnv.live >>>
-          (Annotations.live ++ TestConsole.default ++ Live.default ++ TestRandom.deterministic ++ Sized
-            .live(100) ++ TestSystem.default))
+          (Annotations.live ++ (Live.default >>> TestConsole.debug) ++
+            Live.default ++ TestRandom.deterministic ++ Sized.live(100)
+            ++ TestSystem.default))
 
         testSize(layer, 9)
       },
@@ -98,7 +97,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           _      <- env.use_(ZIO.unit)
           actual <- ref.get
         } yield assert(actual)(equalTo(expected))
-      },
+      } @@ nonFlaky,
       testM("sharing with >>>") {
         val expected = Vector(acquire1, release1)
         for {
@@ -108,7 +107,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           _      <- env.use_(ZIO.unit)
           actual <- ref.get
         } yield assert(actual)(equalTo(expected))
-      },
+      } @@ nonFlaky,
       testM("sharing with multiple layers") {
         for {
           ref    <- makeRef
@@ -122,7 +121,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           assert(actual.slice(1, 3))(hasSameElements(Vector(acquire2, acquire3))) &&
           assert(actual.slice(3, 5))(hasSameElements(Vector(release2, release3))) &&
           assert(actual(5))(equalTo(release1))
-      },
+      } @@ nonFlaky,
       testM("finalizers with ++") {
         for {
           ref    <- makeRef
@@ -133,7 +132,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           actual <- ref.get
         } yield assert(actual.slice(0, 2))(hasSameElements(Vector(acquire1, acquire2))) &&
           assert(actual.slice(2, 4))(hasSameElements(Vector(release1, release2)))
-      },
+      } @@ nonFlaky,
       testM("finalizers with >>>") {
         val expected = Vector(acquire1, acquire2, release2, release1)
         for {
@@ -144,7 +143,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           _      <- env.use_(ZIO.unit)
           actual <- ref.get
         } yield assert(actual)(equalTo(expected))
-      },
+      } @@ nonFlaky,
       testM("finalizers with multiple layers") {
         val expected =
           Vector(acquire1, acquire2, acquire3, release3, release2, release1)
@@ -157,7 +156,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           _      <- env.use_(ZIO.unit)
           actual <- ref.get
         } yield assert(actual)(equalTo(expected))
-      },
+      } @@ nonFlaky,
       testM("map does not interfere with sharing") {
         for {
           ref    <- makeRef
@@ -171,7 +170,7 @@ object ZLayerSpec extends ZIOBaseSpec {
           assert(actual.slice(1, 3))(hasSameElements(Vector(acquire2, acquire3))) &&
           assert(actual.slice(3, 5))(hasSameElements(Vector(release2, release3))) &&
           assert(actual(5))(equalTo(release1))
-      },
+      } @@ nonFlaky,
       testM("mapError does not interfere with sharing") {
         for {
           ref    <- makeRef
@@ -185,16 +184,62 @@ object ZLayerSpec extends ZIOBaseSpec {
           assert(actual.slice(1, 3))(hasSameElements(Vector(acquire2, acquire3))) &&
           assert(actual.slice(3, 5))(hasSameElements(Vector(release2, release3))) &&
           assert(actual(5))(equalTo(release1))
-      },
+      } @@ nonFlaky,
+      testM("interruption with ++") {
+        for {
+          ref    <- makeRef
+          layer1 = makeLayer1(ref)
+          layer2 = makeLayer2(ref)
+          env    = (layer1 ++ layer2).build
+          fiber  <- env.use_(ZIO.unit).fork
+          _      <- fiber.interrupt
+          actual <- ref.get
+        } yield (assert(actual)(contains(acquire1)) ==> assert(actual)(contains(release1))) &&
+          (assert(actual)(contains(acquire2)) ==> assert(actual)(contains(release2)))
+      } @@ nonFlaky,
+      testM("interruption with >>>") {
+        for {
+          ref    <- makeRef
+          layer1 = makeLayer1(ref)
+          layer2 = makeLayer2(ref)
+          env    = (layer1 >>> layer2).build
+          fiber  <- env.use_(ZIO.unit).fork
+          _      <- fiber.interrupt
+          actual <- ref.get
+        } yield (assert(actual)(contains(acquire1)) ==> assert(actual)(contains(release1))) &&
+          (assert(actual)(contains(acquire2)) ==> assert(actual)(contains(release2)))
+      } @@ nonFlaky,
+      testM("interruption with multiple layers") {
+        for {
+          ref    <- makeRef
+          layer1 = makeLayer1(ref)
+          layer2 = makeLayer2(ref)
+          layer3 = makeLayer3(ref)
+          env    = ((layer1 >>> layer2) ++ (layer1 >>> layer3)).build
+          fiber  <- env.use_(ZIO.unit).fork
+          _      <- fiber.interrupt
+          actual <- ref.get
+        } yield (assert(actual)(contains(acquire1)) ==> assert(actual)(contains(release1))) &&
+          (assert(actual)(contains(acquire2)) ==> assert(actual)(contains(release2))) &&
+          (assert(actual)(contains(acquire3)) ==> assert(actual)(contains(release3)))
+      } @@ nonFlaky,
       testM("layers can be acquired in parallel") {
         for {
           promise <- Promise.make[Nothing, Unit]
-          layer1  = ZLayer.fromManaged(Managed.make(ZIO.never)(_ => ZIO.unit))
-          layer2  = ZLayer.fromManaged(Managed.make(promise.succeed(()).map(Has(_)))(_ => ZIO.unit))
+          layer1  = ZLayer.fromManagedMany(Managed.make(ZIO.never)(_ => ZIO.unit))
+          layer2  = ZLayer.fromManagedMany(Managed.make(promise.succeed(()).map(Has(_)))(_ => ZIO.unit))
           env     = (layer1 ++ layer2).build
-          _       <- env.use_(ZIO.unit).fork
+          _       <- env.use_(ZIO.unit).forkDaemon
           _       <- promise.await
         } yield assertCompletes
+      } @@ nonFlaky,
+      testM("map can map the output of a layer to an unrelated type") {
+        case class A(name: String, value: Int)
+        case class B(name: String)
+        val l1: ZLayer.NoDeps[Nothing, Has[A]]       = ZLayer.succeed(A("name", 1))
+        val l2: ZLayer[Has[String], Nothing, Has[B]] = ZLayer.fromService(B)
+        val live: ZLayer.NoDeps[Nothing, Has[B]]     = l1.map(a => Has(a.get[A].name)) >>> l2
+        assertM(ZIO.access[Has[B]](_.get).provideLayer(live))(equalTo(B("name")))
       }
-    ) @@ nonFlaky
+    )
 }

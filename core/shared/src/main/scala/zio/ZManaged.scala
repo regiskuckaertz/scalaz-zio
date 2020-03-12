@@ -160,14 +160,22 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def absorbWith(f: E => Throwable): ZManaged[R, Throwable, A] =
     self.sandbox
       .foldM(
-        cause => ZManaged.failNow(cause.squashWith(f)),
+        cause => ZManaged.fail(cause.squashWith(f)),
         ZManaged.succeedNow
       )
 
   /**
-   * Replaces the error value (if any) by the value provided.
+   * Maps this effect to the specified constant while preserving the
+   * effects of this effect.
    */
-  def asError[E1](e1: => E1): ZManaged[R, E1, A] = mapError(_ => e1)
+  def as[B](b: => B): ZManaged[R, E, B] =
+    map(_ => b)
+
+  /**
+   * Maps the success value of this effect to a service.
+   */
+  def asService[A1 >: A](implicit tagged: Tagged[A1]): ZManaged[R, E, Has[A1]] =
+    map(Has(_))
 
   /**
    * Maps the success value of this effect to an optional value.
@@ -219,7 +227,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def catchSome[R1 <: R, E1 >: E, A1 >: A](
     pf: PartialFunction[E, ZManaged[R1, E1, A1]]
   )(implicit ev: CanFail[E]): ZManaged[R1, E1, A1] =
-    foldM(pf.applyOrElse[E, ZManaged[R1, E1, A1]](_, ZManaged.failNow), ZManaged.succeedNow)
+    foldM(pf.applyOrElse[E, ZManaged[R1, E1, A1]](_, ZManaged.fail(_)), ZManaged.succeedNow)
 
   /**
    * Recovers from some or all of the error Causes.
@@ -227,7 +235,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def catchSomeCause[R1 <: R, E1 >: E, A1 >: A](
     pf: PartialFunction[Cause[E], ZManaged[R1, E1, A1]]
   ): ZManaged[R1, E1, A1] =
-    foldCauseM(pf.applyOrElse[Cause[E], ZManaged[R1, E1, A1]](_, ZManaged.haltNow), ZManaged.succeedNow)
+    foldCauseM(pf.applyOrElse[Cause[E], ZManaged[R1, E1, A1]](_, ZManaged.halt(_)), ZManaged.succeedNow)
 
   /**
    * Fail with `e` if the supplied `PartialFunction` does not match, otherwise
@@ -241,22 +249,13 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * continue with the returned value.
    */
   def collectM[R1 <: R, E1 >: E, B](e: => E1)(pf: PartialFunction[A, ZManaged[R1, E1, B]]): ZManaged[R1, E1, B] =
-    self.flatMap { v =>
-      pf.applyOrElse[A, ZManaged[R1, E1, B]](v, _ => ZManaged.failNow(e))
-    }
+    self.flatMap(v => pf.applyOrElse[A, ZManaged[R1, E1, B]](v, _ => ZManaged.fail(e)))
 
   /**
    * Executes the second effect and then provides its output as an environment to this effect
    */
   def compose[R1, E1 >: E](that: ZManaged[R1, E1, R]): ZManaged[R1, E1, A] =
     self <<< that
-
-  /**
-   * Maps this effect to the specified constant while preserving the
-   * effects of this effect.
-   */
-  def as[B](b: => B): ZManaged[R, E, B] =
-    map(_ => b)
 
   /**
    * Returns an effect whose failure and success have been lifted into an
@@ -273,9 +272,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    */
   def ensuring[R1 <: R](f: ZIO[R1, Nothing, Any]): ZManaged[R1, E, A] =
     ZManaged {
-      reserve.map { r =>
-        r.copy(release = e => r.release(e).ensuring(f))
-      }
+      reserve.map(r => r.copy(release = e => r.release(e).ensuring(f)))
     }
 
   /**
@@ -286,9 +283,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    */
   def ensuringFirst[R1 <: R](f: ZIO[R1, Nothing, Any]): ZManaged[R1, E, A] =
     ZManaged {
-      reserve.map { r =>
-        r.copy(release = e => f.ensuring(r.release(e)))
-      }
+      reserve.map(r => r.copy(release = e => f.ensuring(r.release(e))))
     }
 
   /**
@@ -297,17 +292,8 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    */
   def eventually(implicit ev: CanFail[E]): ZManaged[R, Nothing, A] =
     ZManaged {
-      reserve.eventually.map { r =>
-        Reservation(r.acquire.eventually, r.release)
-      }
+      reserve.eventually.map(r => Reservation(r.acquire.eventually, r.release))
     }
-
-  /**
-   * Executes this effect and returns its value, if it succeeds, but otherwise
-   * returns the specified value.
-   */
-  def fallback[A1 >: A](a: => A1)(implicit ev: CanFail[E]): ZManaged[R, Nothing, A1] =
-    fold(_ => a, identity)
 
   /**
    * Zips this effect with its environment
@@ -333,7 +319,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
             for {
               fs    <- finalizers.get
               exits <- ZIO.foreach(fs)(_(exitU).run)
-              _     <- ZIO.doneNow(Exit.collectAll(exits).getOrElse(Exit.unit))
+              _     <- ZIO.done(Exit.collectAll(exits).getOrElse(Exit.unit))
             } yield ()
         )
       }
@@ -358,7 +344,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * Flip the error and result
     **/
   def flip: ZManaged[R, A, E] =
-    foldM(ZManaged.succeedNow, ZManaged.failNow)
+    foldM(ZManaged.succeedNow, ZManaged.fail(_))
 
   /**
    * Flip the error and result, then apply an effectful function to the effect
@@ -425,7 +411,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
             for {
               fs    <- finalizers.get
               exits <- ZIO.foreach(fs)(_(exitU).run)
-              _     <- ZIO.doneNow(Exit.collectAll(exits).getOrElse(Exit.unit))
+              _     <- ZIO.done(Exit.collectAll(exits).getOrElse(Exit.unit))
             } yield ()
         )
       }
@@ -478,9 +464,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    */
   def mapM[R1 <: R, E1 >: E, B](f: A => ZIO[R1, E1, B]): ZManaged[R1, E1, B] =
     ZManaged[R1, E1, B] {
-      reserve.map { token =>
-        token.copy(acquire = token.acquire.flatMap(f))
-      }
+      reserve.map(token => token.copy(acquire = token.acquire.flatMap(f)))
     }
 
   /**
@@ -504,11 +488,9 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
               case v @ Some((_, e)) => ZIO.succeedNow(e -> v)
               case None =>
                 ZIO.uninterruptibleMask { restore =>
-                  self.provide(r).reserve.flatMap { res =>
-                    restore(res.acquire).run.map(e => e -> Some(res -> e))
-                  }
+                  self.provide(r).reserve.flatMap(res => restore(res.acquire).run.map(e => e -> Some(res -> e)))
                 }
-            }.flatMap(ZIO.doneNow)
+            }.flatMap(ZIO.done(_))
 
           val acquire2: ZIO[R, Nothing, ZManaged[Any, E, A]] =
             ZIO.succeedNow(acquire1.toManaged_)
@@ -580,7 +562,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * the specified function to convert the `E` into a `Throwable`.
    */
   def orDieWith(f: E => Throwable)(implicit ev: CanFail[E]): ZManaged[R, Nothing, A] =
-    mapError(f).catchAll(ZManaged.dieNow)
+    mapError(f).catchAll(ZManaged.die(_))
 
   /**
    * Executes this effect and returns its value, if it succeeds, but
@@ -603,7 +585,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * otherwise fails with the specified error.
    */
   final def orElseFail[E1](e1: => E1)(implicit ev: CanFail[E]): ZManaged[R, E1, A] =
-    orElse(ZManaged.failNow(e1))
+    orElse(ZManaged.fail(e1))
 
   /**
    * Executes this effect and returns its value, if it succeeds, but
@@ -630,16 +612,14 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * Preallocates the managed resource inside an outer managed, resulting in a ZManaged that reserves and acquires immediately and cannot fail.
    */
   def preallocateManaged: ZManaged[R, E, Managed[Nothing, A]] =
-    ZManaged.finalizerRef[R](_ => ZIO.unit).mapM { finalizer =>
+    ZManaged.finalizerRef[R](_ => ZIO.unit).mapM { finalizers =>
       ZIO.uninterruptibleMask { restore =>
         for {
           env      <- ZIO.environment[R]
           res      <- reserve
-          _        <- finalizer.set(res.release)
+          _        <- finalizers.add(res.release)
           resource <- restore(res.acquire)
-        } yield ZManaged.make(ZIO.succeedNow(resource))(_ =>
-          res.release(Exit.Success(resource)).provide(env) *> finalizer.set(_ => ZIO.unit)
-        )
+        } yield ZManaged.make(ZIO.succeedNow(resource))(_ => finalizers.runAll(Exit.succeed(resource)).provide(env))
       }
     }
 
@@ -673,20 +653,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def provideLayer[E1 >: E, R0, R1 <: Has[_]](
     layer: ZLayer[R0, E1, R1]
   )(implicit ev1: R1 <:< R, ev2: NeedsEnv[R]): ZManaged[R0, E1, A] =
-    provideSomeManaged(layer.build.map(ev1))
-
-  /**
-   * An effectual version of `provide`, useful when the act of provision
-   * requires an effect.
-   */
-  def provideM[E1 >: E](r: ZIO[Any, E1, R])(implicit ev: NeedsEnv[R]): Managed[E1, A] =
-    provideManaged(r.toManaged_)
-
-  /**
-   * Uses the given Managed[E1, R] to the environment required to run this managed effect,
-   * leaving no outstanding environments and returning Managed[E1, A]
-   */
-  def provideManaged[E1 >: E](r: Managed[E1, R])(implicit ev: NeedsEnv[R]): Managed[E1, A] = provideSomeManaged(r)
+    layer.build.map(ev1).flatMap(self.provide)
 
   /**
    * Provides some of the environment required to run this effect,
@@ -724,38 +691,6 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
     new ZManaged.ProvideSomeLayer[R0, R, E, A](self)
 
   /**
-   * An effectful version of `provideSome`, useful when the act of partial
-   * provision requires an effect.
-   *
-   * {{{
-   * val managed: ZManaged[Console with Logging, Nothing, Unit] = ???
-   *
-   * val r0: URIO[Console, Console with Logging] = ???
-   *
-   * managed.provideSomeM(r0)
-   * }}}
-   */
-  def provideSomeM[R0, E1 >: E](
-    r0: ZIO[R0, E1, R]
-  )(implicit ev: NeedsEnv[R]): ZManaged[R0, E1, A] =
-    provideSomeManaged(r0.toManaged_)
-
-  /**
-   * Uses the given ZManaged[R0, E1, R] to provide some of the environment required to run this effect,
-   * leaving the remainder `R0`.
-   *
-   * {{{
-   * val managed: ZManaged[Console with Logging, Nothing, Unit] = ???
-   *
-   * val r0: ZManaged[Console, Nothing, Console with Logging] = ???
-   *
-   * managed.provideSomeManaged(r0)
-   * }}}
-   */
-  def provideSomeManaged[R0, E1 >: E](r0: ZManaged[R0, E1, R])(implicit ev: NeedsEnv[R]): ZManaged[R0, E1, A] =
-    r0.flatMap(self.provide)
-
-  /**
    * Gives access to wrapped [[Reservation]].
    */
   def reserve: ZIO[R, E, Reservation[R, E, A]] = reservation
@@ -781,9 +716,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def refineOrDieWith[E1](
     pf: PartialFunction[E, E1]
   )(f: E => Throwable)(implicit ev: CanFail[E]): ZManaged[R, E1, A] =
-    catchAll { e =>
-      pf.lift(e).fold[ZManaged[R, E1, A]](ZManaged.dieNow(f(e)))(ZManaged.failNow)
-    }
+    catchAll(e => pf.lift(e).fold[ZManaged[R, E1, A]](ZManaged.die(f(e)))(ZManaged.fail(_)))
 
   /**
    * Retries with the specified retry policy.
@@ -798,7 +731,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
           policy
             .update(err, state)
             .foldM(
-              _ => ZIO.failNow(err),
+              _ => ZIO.fail(err),
               loop(zio, _)
             ),
         succ => ZIO.succeedNow((state, succ))
@@ -911,12 +844,12 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
     ): ZIO[R with Clock, E, Option[(Duration, Reservation[R, E, A])]] =
       clock.nanoTime.flatMap { start =>
         zio
-          .raceWith(ZIO.sleep(d))(
+          .raceWith(ZIO.sleep(d).interruptible)(
             {
               case (leftDone, rightFiber) =>
                 rightFiber.interrupt.flatMap(_ =>
                   leftDone.foldM(
-                    ZIO.haltNow,
+                    ZIO.halt(_),
                     succ => clock.nanoTime.map(end => Some((Duration.fromNanos(end - start), succ)))
                   )
                 )
@@ -946,6 +879,19 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
     }
 
   }
+
+  /**
+   * Constructs a layer from this managed resource.
+   */
+  def toLayer[A1 >: A](implicit tagged: Tagged[A1]): ZLayer[R, E, Has[A1]] =
+    ZLayer.fromManaged(self)
+
+  /**
+   * Constructs a layer from this managed resource, which must return one or
+   * more services.
+   */
+  def toLayerMany[A1 <: Has[_]](implicit ev: A <:< A1): ZLayer[R, E, A1] =
+    ZLayer(self.map(ev))
 
   /**
    * Return unit while running the effect
@@ -1062,32 +1008,62 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * in parallel, combining their results with the specified `f` function. If
    * either side fails, then the other side will be interrupted.
    */
-  def zipWithPar[R1 <: R, E1 >: E, A1, A2](that: ZManaged[R1, E1, A1])(f0: (A, A1) => A2): ZManaged[R1, E1, A2] =
+  def zipWithPar[R1 <: R, E1 >: E, A1, A2](that: ZManaged[R1, E1, A1])(f0: (A, A1) => A2): ZManaged[R1, E1, A2] = {
+
+    sealed trait State
+    case object Running   extends State
+    case object Acquiring extends State
+    case object Exited    extends State
+
     ZManaged[R1, E1, A2] {
-      Ref.make[List[Exit[Any, Any] => ZIO[R1, Nothing, Any]]](Nil).map { finalizers =>
+      ZManaged.FinalizerRef.make[R1](_ => UIO.unit).map { finalizers =>
         Reservation(
           acquire = {
-            val left = ZIO.uninterruptibleMask { restore =>
-              reserve
-                .flatMap(res => finalizers.update(fs => res.release :: fs).as(res))
-                .flatMap(res => restore(res.acquire))
+            val left = ZIO.uninterruptibleMask {
+              restore =>
+                for {
+                  ref   <- Ref.make[State](Running)
+                  latch <- Promise.make[Nothing, Unit]
+                  res   <- self.reservation
+                  acquire = ZIO.ifM(ref.getAndSet(Acquiring).map(_ == Running))(
+                    restore(res.acquire).ensuring(latch.succeed(())),
+                    ZIO.interrupt
+                  )
+                  release = (exit: Exit[Any, Any]) =>
+                    ZIO.ifM(ref.getAndSet(Exited).map(_ == Acquiring))(
+                      latch.await *> res.release(exit),
+                      res.release(exit)
+                    )
+                  _ <- finalizers.add(release)
+                  a <- acquire
+                } yield a
             }
-            val right = ZIO.uninterruptibleMask { restore =>
-              that.reserve
-                .flatMap(res => finalizers.update(fs => res.release :: fs).as(res))
-                .flatMap(res => restore(res.acquire))
+            val right = ZIO.uninterruptibleMask {
+              restore =>
+                for {
+                  ref   <- Ref.make[State](Running)
+                  latch <- Promise.make[Nothing, Unit]
+                  res   <- that.reserve
+                  acquire = ZIO.ifM(ref.getAndSet(Acquiring).map(_ == Running))(
+                    restore(res.acquire).ensuring(latch.succeed(())),
+                    ZIO.interrupt
+                  )
+                  release = (exit: Exit[Any, Any]) =>
+                    ZIO.ifM(ref.getAndSet(Exited).map(_ == Acquiring))(
+                      latch.await *> res.release(exit),
+                      res.release(exit)
+                    )
+                  _  <- finalizers.add(release)
+                  a1 <- acquire
+                } yield a1
             }
             left.zipWithPar(right)(f0)
           },
-          release = exitU =>
-            for {
-              fs    <- finalizers.get
-              exits <- ZIO.foreachPar(fs)(_(exitU).run)
-              _     <- ZIO.doneNow(Exit.collectAllPar(exits).getOrElse(Exit.unit))
-            } yield ()
+          release = finalizers.runAll
         )
       }
     }
+  }
 }
 
 object ZManaged {
@@ -1105,6 +1081,122 @@ object ZManaged {
   final class AccessManagedPartiallyApplied[R](private val dummy: Boolean = true) extends AnyVal {
     def apply[E, A](f: R => ZManaged[R, E, A]): ZManaged[R, E, A] =
       ZManaged.environment.flatMap(f)
+  }
+
+  /**
+   * A `FinalizerRef` describes the finalizers associated with a scope.
+   *
+   */
+  trait FinalizerRef[R] {
+
+    /**
+     * Adds a finalizer to the finalizers associated with this scope. If the
+     * finalizers associated with this scope have already been run this
+     * finalizer will be run immediately.
+     */
+    def add(finalizer: Exit[Any, Any] => URIO[R, Any]): URIO[R, Unit]
+
+    /**
+     * Removes the finalizers associated with this scope and returns them.
+     */
+    def remove: UIO[Set[Exit[Any, Any] => URIO[R, Any]]]
+
+    /**
+     * Replaces the finalizers associated with this scope and returns them.
+     * If the finalizers associated with this scope have already been run this
+     * finalizer will be run immediately.
+     */
+    def replace(finalizer: Exit[Any, Any] => URIO[R, Any]): URIO[R, Set[Exit[Any, Any] => URIO[R, Any]]]
+
+    /**
+     * Runs the specified finalizer and removes it from the finalizers
+     * associated with this scope.
+     */
+    def run(finalizer: Exit[Any, Any] => URIO[R, Any])(exit: Exit[Any, Any]): URIO[R, Unit]
+
+    /**
+     * Runs the finalizers associated with this scope sequentially. After this
+     * any finalizers added to this scope will be run immediately.
+     */
+    def runAll(exit: Exit[Any, Any]): URIO[R, Unit]
+
+    /**
+     * Runs the finalizers associated with this scope in parallel. After this
+     * any finalizers added to this scope will be run immediately.
+     */
+    def runAllPar(exit: Exit[Any, Any]): URIO[R, Unit]
+  }
+
+  object FinalizerRef {
+
+    /**
+     * Constructs a new `FinalizerRef` with the specified initial finalizer.
+     */
+    def make[R](initial: Exit[Any, Any] => URIO[R, Any]): UIO[FinalizerRef[R]] = {
+
+      sealed trait State
+
+      final case class Exited(exit: Exit[Any, Any], done: Set[Exit[Any, Any] => URIO[R, Any]]) extends State
+      final case class Running(finalizers: Set[Exit[Any, Any] => URIO[R, Any]])                extends State
+
+      Ref.make[State](Running(Set(initial))).map { ref =>
+        new FinalizerRef[R] {
+
+          def add(finalizer: Exit[Any, Any] => URIO[R, Any]): URIO[R, Unit] =
+            ref.getAndUpdate {
+              case Exited(exit, done)  => Exited(exit, done + finalizer)
+              case Running(finalizers) => Running(finalizers + finalizer)
+            }.flatMap {
+              case Exited(exit, done) if !done.contains(finalizer) => finalizer(exit).unit
+              case _                                               => UIO.unit
+            }
+
+          def remove: UIO[Set[Exit[Any, Any] => URIO[R, Any]]] =
+            ref.modifySome(Set.empty[Exit[Any, Any] => URIO[R, Any]]) {
+              case Running(finalizers) => (finalizers, Running(Set.empty))
+            }
+
+          def replace(finalizer: Exit[Any, Any] => URIO[R, Any]): URIO[R, Set[Exit[Any, Any] => URIO[R, Any]]] =
+            ref.getAndUpdate {
+              case Exited(exit, done) => Exited(exit, done + finalizer)
+              case Running(_)         => Running(Set(finalizer))
+            }.flatMap {
+              case Exited(exit, done) if !done.contains(finalizer) => finalizer(exit).as(Set.empty)
+              case Running(finalizers)                             => UIO.succeedNow(finalizers)
+              case _                                               => UIO.succeedNow(Set.empty)
+            }
+
+          def run(finalizer: Exit[Any, Any] => URIO[R, Any])(exit: Exit[Any, Any]): URIO[R, Unit] =
+            ref.getAndUpdate {
+              case Exited(exit, done)  => Exited(exit, done + finalizer)
+              case Running(finalizers) => Running(finalizers - finalizer)
+            }.flatMap {
+              case Exited(_, done) if !done.contains(finalizer) => finalizer(exit).unit
+              case _                                            => finalizer(exit).unit
+            }
+
+          def runAll(exit: Exit[Any, Any]): URIO[R, Unit] =
+            runAllWith(exit)(ZIO.foreach(_)(_.run))
+
+          def runAllPar(exit: Exit[Any, Any]): URIO[R, Unit] =
+            runAllWith(exit)(ZIO.foreachPar(_)(_.run))
+
+          private def runAllWith(
+            exit: Exit[Any, Any]
+          )(f: Set[URIO[R, Any]] => URIO[R, List[Exit[Nothing, Any]]]): URIO[R, Unit] =
+            ref.getAndUpdateSome {
+              case Running(finalizers) => Exited(exit, finalizers)
+            }.flatMap {
+              case Running(finalizers) =>
+                for {
+                  exits <- f(finalizers.map(_(exit)))
+                  _     <- ZIO.done(Exit.collectAllPar(exits).getOrElse(Exit.unit))
+                } yield ()
+              case _ => UIO.unit
+            }
+        }
+      }
+    }
   }
 
   final class IfM[R, E](private val b: ZManaged[R, E, Boolean]) extends AnyVal {
@@ -1242,19 +1334,19 @@ object ZManaged {
     ZManaged.reserve(Reservation(ZIO.unit, f))
 
   /**
-   * Creates an effect that executes a finalizer stored in a [[Ref]]. The `Ref`
-   * is yielded as the result of the effect, allowing for control flows that require
-   * mutating finalizers.
+   * Creates an effect that executes a finalizer stored in a [[FinalizerRef]].
+   * The `FinalizerRef` is yielded as the result of the effect, allowing for
+   * control flows that require mutating finalizers.
    */
   def finalizerRef[R](
     initial: Exit[Any, Any] => ZIO[R, Nothing, Any]
-  ): ZManaged[R, Nothing, Ref[Exit[Any, Any] => ZIO[R, Nothing, Any]]] =
+  ): ZManaged[R, Nothing, FinalizerRef[R]] =
     ZManaged {
       for {
-        ref <- Ref.make(initial)
+        finalizers <- FinalizerRef.make(initial)
         reservation = Reservation(
-          acquire = ZIO.succeedNow(ref),
-          release = e => ref.get.flatMap(_.apply(e))
+          acquire = ZIO.succeedNow(finalizers),
+          release = finalizers.runAll
         )
       } yield reservation
     }
@@ -1279,11 +1371,10 @@ object ZManaged {
    * returns the results in a new `List[B]`.
    *
    * For a parallel version of this method, see `foreachPar`.
+   * If you do not need the results, see `foreach_` for a more efficient implementation.
    */
   def foreach[R, E, A1, A2](as: Iterable[A1])(f: A1 => ZManaged[R, E, A2]): ZManaged[R, E, List[A2]] =
-    as.foldRight[ZManaged[R, E, List[A2]]](succeedNow(Nil)) { (a, m) =>
-      f(a).zipWith(m)(_ :: _)
-    }
+    as.foldRight[ZManaged[R, E, List[A2]]](succeedNow(Nil))((a, m) => f(a).zipWith(m)(_ :: _))
 
   /**
    * Applies the function `f` if the argument is non-empty and
@@ -1346,9 +1437,7 @@ object ZManaged {
    * For a sequential version of this method, see `foreach_`.
    */
   def foreachPar_[R, E, A](as: Iterable[A])(f: A => ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
-    as.foldLeft(unit: ZManaged[R, E, Unit]) { (acc, a) =>
-      acc.zipParLeft(f(a))
-    }
+    as.foldLeft(unit: ZManaged[R, E, Unit])((acc, a) => acc.zipParLeft(f(a)))
 
   /**
    * Applies the function `f` to each element of the `Iterable[A]` and runs
@@ -1363,9 +1452,7 @@ object ZManaged {
   )(
     f: A => ZManaged[R, E, Any]
   ): ZManaged[R, E, Unit] =
-    mergeAllParN[R, E, Any, Unit](n)(as.map(f))(()) { (_, _) =>
-      ()
-    }
+    mergeAllParN[R, E, Any, Unit](n)(as.map(f))(())((_, _) => ())
 
   /**
    * Creates a [[ZManaged]] from an `AutoCloseable` resource. The resource's `close`
@@ -1393,7 +1480,7 @@ object ZManaged {
    * Lifts an `Either` into a `ZManaged` value.
    */
   def fromEither[E, A](v: => Either[E, A]): ZManaged[Any, E, A] =
-    effectTotal(v).flatMap(_.fold(failNow, succeedNow))
+    effectTotal(v).flatMap(_.fold(fail(_), succeedNow))
 
   /**
    * Lifts a function `R => A` into a `ZManaged[R, Nothing, A]`.
@@ -1428,7 +1515,7 @@ object ZManaged {
    * method.
    */
   val interrupt: ZManaged[Any, Nothing, Nothing] =
-    ZManaged.fromEffect(ZIO.descriptor).flatMap(d => haltNow(Cause.interrupt(d.id)))
+    ZManaged.fromEffect(ZIO.descriptor).flatMap(d => halt(Cause.interrupt(d.id)))
 
   /**
    * Returns an effect that is interrupted as if by the specified fiber.
@@ -1770,7 +1857,7 @@ object ZManaged {
    * value, then the specified error will be raised.
    */
   def require[R, E, A](error: => E): ZManaged[R, E, Option[A]] => ZManaged[R, E, A] =
-    (zManaged: ZManaged[R, E, Option[A]]) => zManaged.flatMap(_.fold[ZManaged[R, E, A]](failNow(error))(succeedNow))
+    (zManaged: ZManaged[R, E, Option[A]]) => zManaged.flatMap(_.fold[ZManaged[R, E, A]](fail(error))(succeedNow))
 
   /**
    * Lifts a pure `Reservation[R, E, A]` into `ZManaged[R, E, A]`
@@ -1786,8 +1873,7 @@ object ZManaged {
    */
   def scope: Managed[Nothing, Scope] =
     ZManaged {
-      // we abuse the fact that Function1 will use reference equality
-      Ref.make(Set.empty[Exit[Any, Any] => UIO[Any]]).map { finalizers =>
+      FinalizerRef.make(_ => UIO.unit).map { finalizers =>
         Reservation(
           acquire = ZIO.succeedNow {
             new Scope {
@@ -1798,20 +1884,13 @@ object ZManaged {
                     res      <- managed.reserve
                     resource <- restore(res.acquire).onError(err => res.release(Exit.Failure(err)))
                     release  = res.release.andThen(_.provide(env))
-                    _        <- finalizers.update(_ + release)
-                    done <- Ref
-                             .make(release(Exit.Success(resource)).ensuring(finalizers.update(_ - release)))
-                             .map(_.modify((_, ZIO.unit)).flatten)
+                    _        <- finalizers.add(release)
+                    done     = finalizers.run(release)(Exit.succeed(resource))
                   } yield (resource, done)
                 }
             }
           },
-          release = exitU =>
-            for {
-              fs    <- finalizers.get
-              exits <- ZIO.foreachPar(fs)(_(exitU).run)
-              _     <- ZIO.doneNow(Exit.collectAllPar(exits).getOrElse(Exit.unit))
-            } yield ()
+          release = finalizers.runAll
         )
       }
     }
@@ -1823,30 +1902,9 @@ object ZManaged {
   def second[E, A, B]: ZManaged[(A, B), E, B] = fromFunction(_._2)
 
   /**
-   *  Alias for [[ZManaged.collectAll]]
-   */
-  @deprecated("use collectAll", "1.0.0")
-  def sequence[R, E, A1, A2](ms: Iterable[ZManaged[R, E, A2]]): ZManaged[R, E, List[A2]] =
-    collectAll[R, E, A1, A2](ms)
-
-  /**
-   *  Alias for [[ZManaged.collectAllPar]]
-   */
-  @deprecated("use collectAllPar", "1.0.0")
-  def sequencePar[R, E, A](as: Iterable[ZManaged[R, E, A]]): ZManaged[R, E, List[A]] =
-    collectAllPar[R, E, A](as)
-
-  /**
-   *  Alias for [[ZManaged.collectAllParN]]
-   */
-  @deprecated("use collectAllParN", "1.0.0")
-  def sequenceParN[R, E, A](n: Int)(as: Iterable[ZManaged[R, E, A]]): ZManaged[R, E, List[A]] =
-    collectAllParN[R, E, A](n)(as)
-
-  /**
    * Lifts a lazy, pure value into a Managed.
    */
-  def succeed[R, A](r: => A): ZManaged[R, Nothing, A] =
+  def succeed[A](r: => A): ZManaged[Any, Nothing, A] =
     ZManaged(IO.succeedNow(Reservation(IO.succeed(r), _ => IO.unit)))
 
   /**
@@ -1899,73 +1957,15 @@ object ZManaged {
         ZIO.uninterruptibleMask { restore =>
           for {
             _ <- finalizerRef
-                  .modify(f => (f, _ => UIO.unit))
-                  .flatMap(f => f(Exit.interrupt(fiberId)))
+                  .replace(_ => UIO.unit)
+                  .flatMap(ZIO.foreach(_)(_(Exit.interrupt(fiberId))))
             reservation <- newResource.reserve
-            _           <- finalizerRef.set(reservation.release)
+            _           <- finalizerRef.add(reservation.release)
             a           <- restore(reservation.acquire)
           } yield a
         }
       }
     } yield switch
-
-  /**
-   * Alias for [[[ZManaged.foreach[R,E,A1,A2](as:Iterable*]]]
-   */
-  @deprecated("use foreach", "1.0.0")
-  def traverse[R, E, A1, A2](as: Iterable[A1])(f: A1 => ZManaged[R, E, A2]): ZManaged[R, E, List[A2]] =
-    foreach[R, E, A1, A2](as)(f)
-
-  /**
-   * Alias for [[ZManaged.foreach_]]
-   */
-  @deprecated("use foreach_", "1.0.0")
-  def traverse_[R, E, A](as: Iterable[A])(f: A => ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
-    foreach_[R, E, A](as)(f)
-
-  /**
-   * Alias for [[ZManaged.foreachPar]]
-   */
-  @deprecated("use foreachPar", "1.0.0")
-  def traversePar[R, E, A1, A2](
-    as: Iterable[A1]
-  )(
-    f: A1 => ZManaged[R, E, A2]
-  ): ZManaged[R, E, List[A2]] =
-    foreachPar[R, E, A1, A2](as)(f)
-
-  /**
-   * Alias for [[ZManaged.foreachPar_]]
-   */
-  @deprecated("use foreachPar_", "1.0.0")
-  def traversePar_[R, E, A](as: Iterable[A])(f: A => ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
-    foreachPar_[R, E, A](as)(f)
-
-  /**
-   * Alias for [[ZManaged.foreachParN]]
-   */
-  @deprecated("use foreachParN", "1.0.0")
-  def traverseParN[R, E, A1, A2](
-    n: Int
-  )(
-    as: Iterable[A1]
-  )(
-    f: A1 => ZManaged[R, E, A2]
-  ): ZManaged[R, E, List[A2]] =
-    foreachParN[R, E, A1, A2](n)(as)(f)
-
-  /**
-   * Alias for [[ZManaged.foreachParN_]]
-   */
-  @deprecated("use foreachParN_", "1.0.0")
-  def traverseParN_[R, E, A](
-    n: Int
-  )(
-    as: Iterable[A]
-  )(
-    f: A => ZManaged[R, E, Any]
-  ): ZManaged[R, E, Unit] =
-    foreachParN_[R, E, A](n)(as)(f)
 
   /**
    * Returns the effect resulting from mapping the success of this effect to unit.
@@ -2010,18 +2010,6 @@ object ZManaged {
   def whenM[R, E](b: ZManaged[R, E, Boolean])(zManaged: ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
     b.flatMap(b => if (b) zManaged.unit else unit)
 
-  private[zio] def dieNow(t: Throwable): ZManaged[Any, Nothing, Nothing] =
-    halt(Cause.die(t))
-
-  private[zio] def doneNow[E, A](r: Exit[E, A]): ZManaged[Any, E, A] =
-    ZManaged.fromEffect(ZIO.doneNow(r))
-
-  private[zio] def failNow[E](error: E): ZManaged[Any, E, Nothing] =
-    haltNow(Cause.fail(error))
-
-  private[zio] def haltNow[E](cause: Cause[E]): ZManaged[Any, E, Nothing] =
-    ZManaged.fromEffect(ZIO.haltNow(cause))
-
-  private[zio] def succeedNow[R, A](r: A): ZManaged[R, Nothing, A] =
+  private[zio] def succeedNow[A](r: A): ZManaged[Any, Nothing, A] =
     ZManaged(IO.succeedNow(Reservation(IO.succeedNow(r), _ => IO.unit)))
 }

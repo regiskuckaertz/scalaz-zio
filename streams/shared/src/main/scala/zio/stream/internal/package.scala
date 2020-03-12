@@ -14,20 +14,27 @@
  * limitations under the License.
  */
 
-package zio
+package zio.stream
 
-private[zio] object ScalaSpecific {
+import zio.Chunk
 
-  type TaggedType[A] = scala.reflect.ClassTag[A]
-  type TagType       = scala.reflect.ClassTag[_]
+package object internal {
 
-  private[zio] def taggedIsSubtype[A, B](left: TagType, right: TagType): Boolean =
-    right.runtimeClass.isAssignableFrom(left.runtimeClass)
+  /**
+   * Creates a single-value sink from a value.
+   */
+  def ZSinkSucceedNow[A, B](b: B): ZSink[Any, Nothing, A, A, B] =
+    ZSink.succeedNow(b)
 
-  private[zio] def taggedTagType[A](tagged: Tagged[A]): TagType = tagged.tag
+  /**
+   * Creates a `ZStreamChunk` from an eagerly evaluated chunk
+   */
+  def ZStreamChunkSucceedNow[A](as: Chunk[A]): ZStreamChunk[Any, Nothing, A] =
+    new StreamEffectChunk(StreamEffect.succeed(as))
 
-  private[zio] def taggedGetHasServices[A](t: TagType): Set[TagType] = {
-    val _ = t
-    Set()
-  }
+  /**
+   * Creates a single-valued pure stream
+   */
+  def ZStreamSucceedNow[A](a: A): ZStream[Any, Nothing, A] =
+    StreamEffect.succeed(a)
 }

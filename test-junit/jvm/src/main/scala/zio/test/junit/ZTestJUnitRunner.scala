@@ -7,7 +7,7 @@ import org.junit.runner.{ Description, RunWith, Runner }
 
 import zio.ZIO.effectTotal
 import zio._
-import zio.test.FailureRenderer.FailureMessage.Message
+import zio.test.MessageMarkup.Message
 import zio.test.Spec.{ SpecCase, SuiteCase, TestCase }
 import zio.test.TestFailure.{ Assertion, Runtime }
 import zio.test.TestSuccess.{ Ignored, Succeeded }
@@ -54,7 +54,7 @@ class ZTestJUnitRunner(klass: Class[_]) extends Runner with Filterable with Boot
 
     unsafeRun(
       traverse(filteredSpec, description)
-        .provideManaged(spec.runner.executor.environment)
+        .provideLayer(spec.runner.executor.environment)
     )
     description
   }
@@ -62,7 +62,7 @@ class ZTestJUnitRunner(klass: Class[_]) extends Runner with Filterable with Boot
   override def run(notifier: RunNotifier): Unit =
     zio.Runtime((), spec.runner.platform).unsafeRun {
       val instrumented = instrumentSpec(filteredSpec, new JUnitNotifier(notifier))
-      spec.runner.run(instrumented).unit.provideManaged(spec.runner.bootstrap)
+      spec.runner.run(instrumented).unit.provideLayer(spec.runner.bootstrap)
     }
 
   private def reportRuntimeFailure[E](notifier: JUnitNotifier, path: Vector[String], label: String, cause: Cause[E]) =
@@ -79,9 +79,7 @@ class ZTestJUnitRunner(klass: Class[_]) extends Runner with Filterable with Boot
   ): ZIO[Any, Nothing, Unit] =
     FailureRenderer
       .renderTestFailure("", result)
-      .flatMap { rendered =>
-        notifier.fireTestFailure(label, path, renderToString(rendered))
-      }
+      .flatMap(rendered => notifier.fireTestFailure(label, path, renderToString(rendered)))
 
   private def testDescription(label: String, path: Vector[String]) = {
     val uniqueId = path.mkString(":") + ":" + label

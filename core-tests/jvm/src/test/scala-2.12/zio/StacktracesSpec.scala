@@ -334,7 +334,7 @@ object StackTracesSpec extends DefaultRunnableSpec {
       t1 <- ZIO
              .foreach_(1 to 10) { i =>
                if (i == 7)
-                 ZIO.unit *> ZIO.failNow("Dummy error!")
+                 ZIO.unit *> ZIO.fail("Dummy error!")
                else
                  ZIO.unit *> ZIO.trace
              }
@@ -344,16 +344,12 @@ object StackTracesSpec extends DefaultRunnableSpec {
 
   def foreachParFail: ZIO[Any, Nothing, Unit] =
     for {
-      _ <- ZIO.foreachPar(1 to 10) { i =>
-            (if (i >= 7) UIO(i / 0) else UIO(i / 10))
-          }
+      _ <- ZIO.foreachPar(1 to 10)(i => (if (i >= 7) UIO(i / 0) else UIO(i / 10)))
     } yield ()
 
   def foreachParNFail =
     for {
-      _ <- ZIO.foreachParN(4)(1 to 10) { i =>
-            (if (i >= 7) UIO(i / 0) else UIO(i / 10))
-          }
+      _ <- ZIO.foreachParN(4)(1 to 10)(i => (if (i >= 7) UIO(i / 0) else UIO(i / 10)))
     } yield ()
 
   def leftAssociativeFold(n: Int): ZIO[Any, Nothing, ZTrace] =
@@ -469,7 +465,7 @@ object StackTracesSpec extends DefaultRunnableSpec {
       _ <- ZIO.effect(traceThis()).traced.traced.traced
       _ <- ZIO.unit
       _ <- ZIO.unit
-      _ <- ZIO.failNow("end")
+      _ <- ZIO.fail("end")
     } yield ()).untraced
   }
 
@@ -531,7 +527,7 @@ object StackTracesSpec extends DefaultRunnableSpec {
       t <- Task(fail())
             .flatMap(badMethod)
             .catchSome {
-              case _: ArithmeticException => ZIO.failNow("impossible match!")
+              case _: ArithmeticException => ZIO.fail("impossible match!")
             }
     } yield t
   }
@@ -554,7 +550,7 @@ object StackTracesSpec extends DefaultRunnableSpec {
   object catchAllWithOptimizedEffectFixture {
     val succ               = ZIO.succeedNow(_: ZTrace)
     val fail               = () => throw new Exception("error!")
-    val refailAndLoseTrace = (_: Any) => ZIO.failNow("bad!")
+    val refailAndLoseTrace = (_: Any) => ZIO.fail("bad!")
   }
 
   def foldMWithOptimizedEffect = {

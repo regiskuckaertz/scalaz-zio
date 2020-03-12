@@ -25,18 +25,16 @@ private[zio] trait PlatformSpecific {
   type ZEnv = Clock with Console with System with Random
 
   object ZEnv {
+
+    object Services { 
+      val live: ZEnv =
+        Has.allOf[Clock.Service, Console.Service, System.Service, Random.Service](Clock.Service.live, Console.Service.live, System.Service.live, Random.Service.live)
+      }
+
     val any: ZLayer[ZEnv, Nothing, ZEnv] =
       ZLayer.requires[ZEnv]
+
     val live: ZLayer.NoDeps[Nothing, ZEnv] =
       Clock.live ++ Console.live ++ System.live ++ Random.live
   }
-
-  type TaggedType[A] = ScalaSpecific.TaggedType[A]
-  type TagType       = ScalaSpecific.TagType
-
-  private[zio] def taggedTagType[A](t: Tagged[A]): TagType = ScalaSpecific.taggedTagType(t)
-
-  private[zio] def taggedIsSubtype(left: TagType, right: TagType): Boolean = ScalaSpecific.taggedIsSubtype(left, right)
-
-  private[zio] def taggedGetHasServices[A](t: TagType): Set[TagType] = ScalaSpecific.taggedGetHasServices(t)
 }

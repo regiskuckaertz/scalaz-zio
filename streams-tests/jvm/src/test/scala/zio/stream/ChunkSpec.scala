@@ -20,9 +20,7 @@ object ChunkSpec extends ZIOBaseSpec {
       }
     },
     testM("length") {
-      check(largeChunks(intGen)) { chunk =>
-        assert(chunk.length)(equalTo(chunk.toSeq.length))
-      }
+      check(largeChunks(intGen))(chunk => assert(chunk.length)(equalTo(chunk.toSeq.length)))
     },
     testM("equality") {
       check(mediumChunks(intGen), mediumChunks(intGen)) { (c1, c2) =>
@@ -33,9 +31,7 @@ object ChunkSpec extends ZIOBaseSpec {
       assert(Chunk(1, 2, 3, 4, 5))(Assertion.not(equalTo(Chunk(1, 2, 3, 4, 5, 6))))
     },
     testM("materialize") {
-      check(mediumChunks(intGen)) { c =>
-        assert(c.materialize.toSeq)(equalTo(c.toSeq))
-      }
+      check(mediumChunks(intGen))(c => assert(c.materialize.toSeq)(equalTo(c.toSeq)))
     },
     testM("foldLeft") {
       check(intGen, Gen.function2(intGen), smallChunks(intGen)) { (s0, f, c) =>
@@ -50,21 +46,19 @@ object ChunkSpec extends ZIOBaseSpec {
         assertM(Chunk(1, 1, 1).mapAccumM(0)((s, el) => UIO.succeedNow((s + el, s + el))))(equalTo((3, Chunk(1, 2, 3))))
       },
       testM("mapAccumM error") {
-        Chunk(1, 1, 1).mapAccumM(0)((_, _) => IO.failNow("Ouch")).either.map(assert(_)(isLeft(equalTo("Ouch"))))
+        Chunk(1, 1, 1).mapAccumM(0)((_, _) => IO.fail("Ouch")).either.map(assert(_)(isLeft(equalTo("Ouch"))))
       }
     ),
     testM("map") {
       val fn = Gen.function[Random with Sized, Int, Int](intGen)
-      check(smallChunks(intGen), fn) { (c, f) =>
-        assert(c.map(f).toSeq)(equalTo(c.toSeq.map(f)))
-      }
+      check(smallChunks(intGen), fn)((c, f) => assert(c.map(f).toSeq)(equalTo(c.toSeq.map(f))))
     },
     suite("mapM")(
       testM("mapM happy path")(checkM(mediumChunks(intGen), Gen.function(Gen.boolean)) { (chunk, f) =>
         chunk.mapM(s => UIO.succeedNow(f(s))).map(assert(_)(equalTo(chunk.map(f))))
       }),
       testM("mapM error") {
-        Chunk(1, 2, 3).mapM(_ => IO.failNow("Ouch")).either.map(assert(_)(equalTo(Left("Ouch"))))
+        Chunk(1, 2, 3).mapM(_ => IO.fail("Ouch")).either.map(assert(_)(equalTo(Left("Ouch"))))
       }
     ),
     testM("flatMap") {
@@ -74,14 +68,10 @@ object ChunkSpec extends ZIOBaseSpec {
       }
     },
     testM("headOption") {
-      check(mediumChunks(intGen)) { c =>
-        assert(c.headOption)(equalTo(c.toSeq.headOption))
-      }
+      check(mediumChunks(intGen))(c => assert(c.headOption)(equalTo(c.toSeq.headOption)))
     },
     testM("lastOption") {
-      check(mediumChunks(intGen)) { c =>
-        assert(c.lastOption)(equalTo(c.toSeq.lastOption))
-      }
+      check(mediumChunks(intGen))(c => assert(c.lastOption)(equalTo(c.toSeq.lastOption)))
     },
     testM("indexWhere") {
       val fn = Gen.function[Random with Sized, Int, Boolean](Gen.boolean)
@@ -91,40 +81,30 @@ object ChunkSpec extends ZIOBaseSpec {
     } @@ exceptScala211,
     testM("exists") {
       val fn = Gen.function[Random with Sized, Int, Boolean](Gen.boolean)
-      check(mediumChunks(intGen), fn) { (chunk, p) =>
-        assert(chunk.exists(p))(equalTo(chunk.toSeq.exists(p)))
-      }
+      check(mediumChunks(intGen), fn)((chunk, p) => assert(chunk.exists(p))(equalTo(chunk.toSeq.exists(p))))
     },
     testM("forall") {
       val fn = Gen.function[Random with Sized, Int, Boolean](Gen.boolean)
-      check(mediumChunks(intGen), fn) { (chunk, p) =>
-        assert(chunk.forall(p))(equalTo(chunk.toSeq.forall(p)))
-      }
+      check(mediumChunks(intGen), fn)((chunk, p) => assert(chunk.forall(p))(equalTo(chunk.toSeq.forall(p))))
     },
     testM("find") {
       val fn = Gen.function[Random with Sized, Int, Boolean](Gen.boolean)
-      check(mediumChunks(intGen), fn) { (chunk, p) =>
-        assert(chunk.find(p))(equalTo(chunk.toSeq.find(p)))
-      }
+      check(mediumChunks(intGen), fn)((chunk, p) => assert(chunk.find(p))(equalTo(chunk.toSeq.find(p))))
     },
     testM("filter") {
       val fn = Gen.function[Random with Sized, Int, Boolean](Gen.boolean)
-      check(mediumChunks(intGen), fn) { (chunk, p) =>
-        assert(chunk.filter(p).toSeq)(equalTo(chunk.toSeq.filter(p)))
-      }
+      check(mediumChunks(intGen), fn)((chunk, p) => assert(chunk.filter(p).toSeq)(equalTo(chunk.toSeq.filter(p))))
     },
     suite("filterM")(
       testM("filterM happy path")(checkM(mediumChunks(intGen), Gen.function(Gen.boolean)) { (chunk, p) =>
         chunk.filterM(s => UIO.succeedNow(p(s))).map(assert(_)(equalTo(chunk.filter(p))))
       }),
       testM("filterM error") {
-        Chunk(1, 2, 3).filterM(_ => IO.failNow("Ouch")).either.map(assert(_)(equalTo(Left("Ouch"))))
+        Chunk(1, 2, 3).filterM(_ => IO.fail("Ouch")).either.map(assert(_)(equalTo(Left("Ouch"))))
       }
     ),
     testM("drop chunk") {
-      check(largeChunks(intGen), intGen) { (chunk, n) =>
-        assert(chunk.drop(n).toSeq)(equalTo(chunk.toSeq.drop(n)))
-      }
+      check(largeChunks(intGen), intGen)((chunk, n) => assert(chunk.drop(n).toSeq)(equalTo(chunk.toSeq.drop(n))))
     },
     testM("take chunk") {
       check(chunkWithIndex(Gen.unit)) {
@@ -143,9 +123,7 @@ object ChunkSpec extends ZIOBaseSpec {
       }
     },
     testM("toArray") {
-      check(mediumChunks(intGen)) { c =>
-        assert(c.toArray.toSeq)(equalTo(c.toSeq))
-      }
+      check(mediumChunks(intGen))(c => assert(c.toArray.toSeq)(equalTo(c.toSeq)))
     },
     test("non-homogeneous element type") {
       trait Animal
@@ -165,9 +143,7 @@ object ChunkSpec extends ZIOBaseSpec {
       assert(Chunk(1).filter(_ == 2).map(_.toString).toArray[String])(equalTo(Array.empty[String]))
     },
     testM("toArray with elements of type String") {
-      check(mediumChunks(intGen)) { c =>
-        assert(c.toArray.toSeq)(equalTo(c.toSeq))
-      }
+      check(mediumChunks(intGen))(c => assert(c.toArray.toSeq)(equalTo(c.toSeq)))
     },
     test("toArray for a Chunk of any type") {
       val v: Vector[Any] = Vector("String", 1, Value(2))
@@ -179,9 +155,7 @@ object ChunkSpec extends ZIOBaseSpec {
       },
       testM("collect chunk") {
         val pfGen = Gen.partialFunction[Random with Sized, Int, Int](intGen)
-        check(mediumChunks(intGen), pfGen) { (c, pf) =>
-          assert(c.collect(pf).toSeq)(equalTo(c.toSeq.collect(pf)))
-        }
+        check(mediumChunks(intGen), pfGen)((c, pf) => assert(c.collect(pf).toSeq)(equalTo(c.toSeq.collect(pf))))
       }
     ),
     suite("collectM")(
@@ -198,7 +172,7 @@ object ChunkSpec extends ZIOBaseSpec {
         }
       },
       testM("collectM chunk that fails") {
-        Chunk(1, 2).collectM { case 2 => IO.failNow("Ouch") }.either.map(assert(_)(isLeft(equalTo("Ouch"))))
+        Chunk(1, 2).collectM { case 2 => IO.fail("Ouch") }.either.map(assert(_)(isLeft(equalTo("Ouch"))))
       }
     ),
     suite("collectWhile")(
@@ -226,7 +200,7 @@ object ChunkSpec extends ZIOBaseSpec {
         }
       },
       testM("collectWhileM chunk that fails") {
-        Chunk(1, 2).collectWhileM { case _ => IO.failNow("Ouch") }.either.map(assert(_)(isLeft(equalTo("Ouch"))))
+        Chunk(1, 2).collectWhileM { case _ => IO.fail("Ouch") }.either.map(assert(_)(isLeft(equalTo("Ouch"))))
       }
     ),
     testM("foreach") {
@@ -296,7 +270,7 @@ object ChunkSpec extends ZIOBaseSpec {
     test("filterConstFalseResultsInEmptyChunk") {
       assert(Chunk.fromArray(Array(1, 2, 3)).filter(_ => false))(equalTo(Chunk.empty))
     },
-    test("def testzipAllWith") {
+    test("zipAllWith") {
       assert(Chunk(1, 2, 3).zipAllWith(Chunk(3, 2, 1))(_ => 0, _ => 0)(_ + _))(equalTo(Chunk(4, 4, 4))) &&
       assert(Chunk(1, 2, 3).zipAllWith(Chunk(3, 2))(_ => 0, _ => 0)(_ + _))(equalTo(Chunk(4, 4, 0))) &&
       assert(Chunk(1, 2).zipAllWith(Chunk(3, 2, 1))(_ => 0, _ => 0)(_ + _))(equalTo(Chunk(4, 4, 0)))

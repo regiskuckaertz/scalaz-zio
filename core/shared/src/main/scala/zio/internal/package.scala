@@ -16,11 +16,25 @@
 
 package zio
 
-sealed abstract class SuperviseStatus extends Serializable with Product
-object SuperviseStatus {
-  def supervised: SuperviseStatus   = Supervised
-  def unsupervised: SuperviseStatus = Unsupervised
+import zio.stm.ZSTM
 
-  case object Supervised   extends SuperviseStatus
-  case object Unsupervised extends SuperviseStatus
+package object internal {
+
+  /**
+   * Returns an effect that models success with the specified value.
+   */
+  def ZIOSucceedNow[A](a: A): ZIO[Any, Nothing, A] =
+    ZIO.succeedNow(a)
+
+  /**
+   * Lifts an eager, pure value into a Managed.
+   */
+  def ZManagedSucceedNow[A](r: A): ZManaged[Any, Nothing, A] =
+    ZManaged(IO.succeedNow(Reservation(IO.succeedNow(r), _ => IO.unit)))
+
+  /**
+   * Returns an `STM` effect that succeeds with the specified value.
+   */
+  def ZSTMSucceedNow[A](a: A): ZSTM[Any, Nothing, A] =
+    ZSTM.succeedNow(a)
 }

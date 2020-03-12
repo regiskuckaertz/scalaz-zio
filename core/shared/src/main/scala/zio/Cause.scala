@@ -249,9 +249,7 @@ sealed trait Cause[+E] extends Product with Serializable { self =>
     }
 
     def renderTrace(maybeTrace: Option[ZTrace]): List[String] =
-      maybeTrace.fold("No ZIO Trace available." :: Nil) { trace =>
-        "" :: lines(trace.prettyPrint)
-      }
+      maybeTrace.fold("No ZIO Trace available." :: Nil)(trace => "" :: lines(trace.prettyPrint))
 
     def renderFail(error: List[String], maybeTrace: Option[ZTrace]): Sequential =
       Sequential(
@@ -350,7 +348,13 @@ sealed trait Cause[+E] extends Product with Serializable { self =>
    */
   final def squashWith(f: E => Throwable): Throwable =
     failureOption.map(f) orElse
-      (if (interrupted) Some(new InterruptedException) else None) orElse
+      (if (interrupted)
+         Some(
+           new InterruptedException(
+             "Interrupted by fibers: " + interruptors.map(_.seqNumber.toString()).map("#" + _).mkString(", ")
+           )
+         )
+       else None) orElse
       defects.headOption getOrElse (new InterruptedException)
 
   /**
@@ -513,27 +517,27 @@ object Cause extends Serializable {
    * Converts the specified `Cause[Either[E, A]]` to an `Either[Cause[E], A]` by
    * recursively stripping out any failures with the error `None`.
    */
-  def sequenceCauseEither[E, A](c: Cause[Either[E, A]]): Either[A, Cause[E]] =
+  def sequenceCauseEither[E, A](c: Cause[Either[E, A]]): Either[Cause[E], A] =
     c match {
-      case Internal.Empty                => Right(Internal.Empty)
-      case Internal.Traced(cause, trace) => sequenceCauseEither(cause).map(Internal.Traced(_, trace))
-      case Internal.Meta(cause, data)    => sequenceCauseEither(cause).map(Internal.Meta(_, data))
-      case Internal.Interrupt(id)        => Right(Internal.Interrupt(id))
-      case d @ Internal.Die(_)           => Right(d)
-      case Internal.Fail(Left(e))        => Right(Internal.Fail(e))
-      case Internal.Fail(Right(a))       => Left(a)
+      case Internal.Empty                => Left(Internal.Empty)
+      case Internal.Traced(cause, trace) => sequenceCauseEither(cause).left.map(Internal.Traced(_, trace))
+      case Internal.Meta(cause, data)    => sequenceCauseEither(cause).left.map(Internal.Meta(_, data))
+      case Internal.Interrupt(id)        => Left(Internal.Interrupt(id))
+      case d @ Internal.Die(_)           => Left(d)
+      case Internal.Fail(Left(e))        => Left(Internal.Fail(e))
+      case Internal.Fail(Right(a))       => Right(a)
       case Internal.Then(left, right) =>
         (sequenceCauseEither(left), sequenceCauseEither(right)) match {
-          case (Right(cl), Right(cr)) => Right(Internal.Then(cl, cr))
-          case (Left(a), _)           => Left(a)
-          case (_, Left(a))           => Left(a)
+          case (Left(cl), Left(cr)) => Left(Internal.Then(cl, cr))
+          case (Right(a), _)        => Right(a)
+          case (_, Right(a))        => Right(a)
         }
 
       case Internal.Both(left, right) =>
         (sequenceCauseEither(left), sequenceCauseEither(right)) match {
-          case (Right(cl), Right(cr)) => Right(Internal.Both(cl, cr))
-          case (Left(a), _)           => Left(a)
-          case (_, Left(a))           => Left(a)
+          case (Left(cl), Left(cr)) => Left(Internal.Both(cl, cr))
+          case (Right(a), _)        => Right(a)
+          case (_, Right(a))        => Right(a)
         }
     }
 

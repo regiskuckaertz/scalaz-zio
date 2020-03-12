@@ -16,11 +16,10 @@
 
 package zio.test
 
+import zio._
 import zio.duration._
-import zio.system
 import zio.test.Assertion.{ equalTo, hasMessage, isCase, isSubtype }
 import zio.test.environment.{ Live, Restorable, TestClock, TestConsole, TestRandom, TestSystem }
-import zio.{ Cause, Schedule, ZIO, ZManaged }
 
 /**
  * A `TestAspect` is an aspect that can be weaved into specs. You can think of
@@ -94,8 +93,8 @@ object TestAspect extends TimeoutVariants {
     new TestAspect.PerTest[Nothing, R0, E0, Any] {
       def perTest[R <: R0, E >: E0](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
         test.run
-          .zipWith(effect.catchAllCause(cause => ZIO.failNow(TestFailure.Runtime(cause))).run)(_ <* _)
-          .flatMap(ZIO.doneNow)
+          .zipWith(effect.catchAllCause(cause => ZIO.fail(TestFailure.Runtime(cause))).run)(_ <* _)
+          .flatMap(ZIO.done(_))
     }
 
   /**
@@ -117,7 +116,7 @@ object TestAspect extends TimeoutVariants {
   )(after: A0 => ZIO[R0, Nothing, Any]): TestAspect[Nothing, R0, E0, Any] =
     new TestAspect.PerTest[Nothing, R0, E0, Any] {
       def perTest[R <: R0, E >: E0](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
-        before.catchAllCause(c => ZIO.failNow(TestFailure.Runtime(c))).bracket(after)(_ => test)
+        before.catchAllCause(c => ZIO.fail(TestFailure.Runtime(c))).bracket(after)(_ => test)
     }
 
   /**
@@ -160,6 +159,44 @@ object TestAspect extends TimeoutVariants {
     new TestAspect.PerTest[Nothing, R0, E0, Any] {
       def perTest[R <: R0, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
         effect *> test
+    }
+
+  /**
+   * An aspect that runs each test on a separate fiber and prints a fiber dump
+   * if the test fails or has not terminated within the specified duration.
+   */
+  def diagnose(duration: Duration): TestAspectAtLeastR[Live] =
+    new TestAspectAtLeastR[Live] {
+      def some[R <: Live, E](predicate: String => Boolean, spec: ZSpec[R, E]): ZSpec[R, E] = {
+        def diagnose[R <: Live, E](
+          label: String,
+          test: ZIO[R, TestFailure[E], TestSuccess]
+        ): ZIO[R, TestFailure[E], TestSuccess] =
+          test.fork.flatMap { fiber =>
+            fiber.join.raceWith(Live.live(ZIO.sleep(duration)))(
+              (exit, sleepFiber) => dump(label, fiber).when(!exit.succeeded) *> sleepFiber.interrupt *> ZIO.done(exit),
+              (_, _) => dump(label, fiber) *> fiber.join
+            )
+          }
+        def dump[E, A](label: String, fiber: Fiber.Runtime[E, A]): ZIO[Live, Nothing, Unit] =
+          Live.live(Fiber.putDumpStr(label, fiber))
+        spec.transform[R, TestFailure[E], TestSuccess] {
+          case c @ Spec.SuiteCase(_, _, _) => c
+          case Spec.TestCase(label, test, annotations) =>
+            Spec.TestCase(label, if (predicate(label)) diagnose(label, test) else test, annotations)
+        }
+      }
+    }
+
+  /**
+   * An aspect that runs each test with the `TestConsole` instance in the
+   * environment set to debug mode so that console output is rendered to
+   * standard output in addition to being written to the output buffer.
+   */
+  val debug: TestAspectAtLeastR[TestConsole] =
+    new PerTest.AtLeastR[TestConsole] {
+      def perTest[R <: TestConsole, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
+        TestConsole.debug(test)
     }
 
   /**
@@ -263,10 +300,10 @@ object TestAspect extends TimeoutVariants {
             case testFailure =>
               p.run(testFailure).run.flatMap { p1 =>
                 if (p1.isSuccess) succeed
-                else ZIO.failNow(TestFailure.Assertion(assert(testFailure)(p)))
+                else ZIO.fail(TestFailure.Assertion(assert(testFailure)(p)))
               }
           },
-          _ => ZIO.failNow(TestFailure.Runtime(zio.Cause.die(new RuntimeException("did not fail as expected"))))
+          _ => ZIO.fail(TestFailure.Runtime(zio.Cause.die(new RuntimeException("did not fail as expected"))))
         )
       }
     }
@@ -284,6 +321,15 @@ object TestAspect extends TimeoutVariants {
    */
   def flaky(n: Int): TestAspectAtLeastR[ZTestEnv with Annotations] =
     retry(Schedule.recurs(n))
+
+  /**
+   * An aspect that runs each test on its own separate fiber.
+   */
+  val forked: TestAspectPoly =
+    new PerTest.Poly {
+      def perTest[R, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
+        test.fork.flatMap(_.join)
+    }
 
   /**
    * An aspect that only runs a test if the specified environment variable
@@ -347,6 +393,14 @@ object TestAspect extends TimeoutVariants {
     if (TestPlatform.isJVM) identity else ignore
 
   /**
+   * An aspect that causes calls to `sleep` and methods implemented in terms
+   * of it to be executed immediately instead of requiring the `TestClock` to
+   * be adjusted.
+   */
+  val noDelay: TestAspectAtLeastR[TestClock] =
+    before(TestClock.runAll)
+
+  /**
    * An aspect that repeats the test a default number of times, ensuring it is
    * stable ("non-flaky"). Stops at the first failure.
    */
@@ -375,6 +429,13 @@ object TestAspect extends TimeoutVariants {
           isSubtype[TestTimeoutException](hasMessage(equalTo(s"Timeout of ${duration.render} exceeded.")))
         )
       )
+
+  /**
+   * Sets the seed of the `TestRandom` instance in the environment to a random
+   * value before each test.
+   */
+  val nondeterministic: TestAspectAtLeastR[Live with TestRandom] =
+    before(Live.live(clock.nanoTime).flatMap(TestRandom.setSeed(_)))
 
   /**
    * An aspect that executes the members of a suite in parallel.
@@ -534,6 +595,24 @@ object TestAspect extends TimeoutVariants {
     if (TestVersion.isScala213) identity else ignore
 
   /**
+   * Sets the seed of the `TestRandom` instance in the environment to the
+   * specified value before each test.
+   */
+  def setSeed(seed: => Long): TestAspectAtLeastR[TestRandom] =
+    before(TestRandom.setSeed(seed))
+
+  /**
+   * An aspect that runs each test with the `TestConsole` instance in the
+   * environment set to silent mode so that console output is only written to
+   * the output buffer and not rendered to standard output.
+   */
+  val silent: TestAspectAtLeastR[TestConsole] =
+    new PerTest.AtLeastR[TestConsole] {
+      def perTest[R <: TestConsole, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
+        TestConsole.silent(test)
+    }
+
+  /**
    * An aspect that converts ignored tests into test failures.
    */
   val success: TestAspectPoly =
@@ -541,7 +620,7 @@ object TestAspect extends TimeoutVariants {
       def perTest[R, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] =
         test.flatMap {
           case TestSuccess.Ignored =>
-            ZIO.failNow(TestFailure.Runtime(Cause.die(new RuntimeException("Test was ignored."))))
+            ZIO.fail(TestFailure.Runtime(Cause.die(new RuntimeException("Test was ignored."))))
           case x => ZIO.succeedNow(x)
         }
     }
@@ -571,24 +650,17 @@ object TestAspect extends TimeoutVariants {
    * @param duration maximum test duration
    * @param interruptDuration after test timeout will wait given duration for successful interruption
    */
-  def timeout(duration: Duration, interruptDuration: Duration = 1.second): TestAspectAtLeastR[Live] =
+  def timeout(
+    duration: Duration
+  ): TestAspectAtLeastR[Live] =
     new PerTest.AtLeastR[Live] {
       def perTest[R <: Live, E](test: ZIO[R, TestFailure[E], TestSuccess]): ZIO[R, TestFailure[E], TestSuccess] = {
         def timeoutFailure =
           TestTimeoutException(s"Timeout of ${duration.render} exceeded.")
-        def interruptionTimeoutFailure = {
-          val msg =
-            s"Timeout of ${duration.render} exceeded. Couldn't interrupt test within ${interruptDuration.render}, possible resource leak!"
-          TestTimeoutException(msg)
-        }
         Live
-          .withLive(test)(_.either.timeoutFork(duration).flatMap {
-            case Left(fiber) =>
-              fiber.join.raceWith(ZIO.sleep(interruptDuration))(
-                (_, fiber) => fiber.interrupt *> ZIO.failNow(TestFailure.Runtime(Cause.die(timeoutFailure))),
-                (_, _) => ZIO.failNow(TestFailure.Runtime(Cause.die(interruptionTimeoutFailure)))
-              )
-            case Right(result) => result.fold(ZIO.failNow, ZIO.succeedNow)
+          .withLive(test)(_.either.disconnect.timeout(duration).flatMap {
+            case None         => ZIO.fail(TestFailure.Runtime(Cause.die(timeoutFailure)))
+            case Some(result) => ZIO.fromEither(result)
           })
       }
     }

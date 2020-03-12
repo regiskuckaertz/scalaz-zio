@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import zio.clock.Clock
 import zio.duration._
 import zio.test.Assertion._
-import zio.test.TestAspect.{ flaky, jvm, nonFlaky }
+import zio.test.TestAspect.{ jvm, nonFlaky }
 import zio.test._
 import zio.test.environment.Live
 
@@ -47,17 +47,15 @@ object RTSSpec extends ZIOBaseSpec {
         for {
           release <- zio.Promise.make[Nothing, Int]
           latch   = internal.OneShot.make[Unit]
-          async = IO.effectAsyncInterrupt[Nothing, Unit] { _ =>
-            latch.set(()); Left(release.succeed(42).unit)
-          }
-          fiber  <- async.fork
-          _      <- IO.effectTotal(latch.get(1000))
-          _      <- fiber.interrupt.fork
-          result <- release.await
+          async   = IO.effectAsyncInterrupt[Nothing, Unit] { _ => latch.set(()); Left(release.succeed(42).unit) }
+          fiber   <- async.fork
+          _       <- IO.effectTotal(latch.get(1000))
+          _       <- fiber.interrupt.fork
+          result  <- release.await
         } yield result == 42
 
       assertM(io)(isTrue)
-    } @@ flaky,
+    },
     testM("Fiber dump looks correct") {
       for {
         promise <- Promise.make[Nothing, Int]
@@ -84,7 +82,7 @@ object RTSSpec extends ZIOBaseSpec {
             .succeed(21)
             .bracketExit((r: Int, exit: Exit[Any, Any]) =>
               if (exit.interrupted) exitLatch.succeed(r)
-              else IO.dieNow(new Error("Unexpected case"))
+              else IO.die(new Error("Unexpected case"))
             )(a => startLatch.succeed(a) *> IO.never *> IO.succeedNow(1))
           fiber      <- bracketed.fork
           startValue <- startLatch.await

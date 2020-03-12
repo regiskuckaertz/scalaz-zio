@@ -26,7 +26,7 @@ final class TArray[A] private[stm] (private[stm] val array: Array[TRef[A]]) exte
    */
   def apply(index: Int): STM[Nothing, A] =
     if (0 <= index && index < array.length) array(index).get
-    else STM.dieNow(new ArrayIndexOutOfBoundsException(index))
+    else STM.die(new ArrayIndexOutOfBoundsException(index))
 
   /**
    * Finds the result of applying a partial function to the first value in its domain.
@@ -127,9 +127,7 @@ final class TArray[A] private[stm] (private[stm] val array: Array[TRef[A]]) exte
   def foldM[E, Z](acc: Z)(op: (Z, A) => STM[E, Z]): STM[E, Z] =
     if (array.isEmpty) STM.succeedNow(acc)
     else
-      array.head.get.flatMap { a =>
-        op(acc, a).flatMap(acc2 => new TArray(array.tail).foldM(acc2)(op))
-      }
+      array.head.get.flatMap(a => op(acc, a).flatMap(acc2 => new TArray(array.tail).foldM(acc2)(op)))
 
   /**
    * Atomically evaluate the conjunction of a predicate across the members
@@ -279,7 +277,7 @@ final class TArray[A] private[stm] (private[stm] val array: Array[TRef[A]]) exte
    */
   def update(index: Int, fn: A => A): STM[Nothing, Unit] =
     if (0 <= index && index < array.length) array(index).update(fn)
-    else STM.dieNow(new ArrayIndexOutOfBoundsException(index))
+    else STM.die(new ArrayIndexOutOfBoundsException(index))
 
   /**
    * Atomically updates element in the array with given transactional effect.
@@ -291,7 +289,7 @@ final class TArray[A] private[stm] (private[stm] val array: Array[TRef[A]]) exte
         newVal     <- fn(currentVal)
         _          <- array(index).set(newVal)
       } yield ()
-    else STM.dieNow(new ArrayIndexOutOfBoundsException(index))
+    else STM.die(new ArrayIndexOutOfBoundsException(index))
 }
 
 object TArray {
