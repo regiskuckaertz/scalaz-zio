@@ -236,7 +236,7 @@ object ZManagedSpec extends ZIOBaseSpec {
         } yield assert(values)(equalTo(List(1, 1)))
       },
       testM("Runs onSuccess on success") {
-        import zio.CanFail.canFail
+        implicit val canFail = CanFail
         for {
           effects <- Ref.make[List[Int]](Nil)
           res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
@@ -253,7 +253,7 @@ object ZManagedSpec extends ZIOBaseSpec {
         } yield assert(values)(equalTo(List(1, 2, 2, 1)))
       },
       testM("Invokes cleanups on interrupt - 1") {
-        import zio.CanFail.canFail
+        implicit val canFail = CanFail
         for {
           effects <- Ref.make[List[Int]](Nil)
           res     = (x: Int) => Managed.make(effects.update(x :: _))(_ => effects.update(x :: _))
@@ -545,8 +545,8 @@ object ZManagedSpec extends ZIOBaseSpec {
     ),
     suite("orElseFail")(
       testM("executes this effect and returns its value if it succeeds") {
-        import zio.CanFail.canFail
-        val managed = ZManaged.succeedNow(true).orElseFail(false)
+        implicit val canFail = CanFail
+        val managed          = ZManaged.succeedNow(true).orElseFail(false)
         assertM(managed.use(ZIO.succeedNow))(isTrue)
       },
       testM("otherwise fails with the specified error") {
@@ -556,8 +556,8 @@ object ZManagedSpec extends ZIOBaseSpec {
     ),
     suite("orElseSucceed")(
       testM("executes this effect and returns its value if it succeeds") {
-        import zio.CanFail.canFail
-        val managed = ZManaged.succeedNow(true).orElseSucceed(false)
+        implicit val canFail = CanFail
+        val managed          = ZManaged.succeedNow(true).orElseSucceed(false)
         assertM(managed.use(ZIO.succeedNow))(isTrue)
       },
       testM("otherwise succeeds with the specified value") {
@@ -720,6 +720,56 @@ object ZManagedSpec extends ZIOBaseSpec {
                 .run
           count <- releases.get
         } yield assert(count)(equalTo(3))
+      }
+    ),
+    suite("reject")(
+      testM("returns failure ignoring value") {
+        val goodCase =
+          ZManaged.succeedNow(0).reject({ case v if v != 0 => "Partial failed!" }).sandbox.either
+
+        val badCase = ZManaged
+          .succeedNow(1)
+          .reject({ case v if v != 0 => "Partial failed!" })
+          .sandbox
+          .either
+          .map(_.left.map(_.failureOrCause))
+
+        for {
+          goodCaseCheck <- goodCase.use(r => ZIO.succeedNow(assert(r)(isRight(equalTo(0)))))
+          badCaseCheck  <- badCase.use(r => ZIO.succeedNow(assert(r)(isLeft(isLeft(equalTo("Partial failed!"))))))
+        } yield goodCaseCheck && badCaseCheck
+      }
+    ),
+    suite("rejectM")(
+      testM("returns failure ignoring value") {
+        val goodCase =
+          ZManaged
+            .succeedNow(0)
+            .rejectM[Any, String]({ case v if v != 0 => ZManaged.succeedNow("Partial failed!") })
+            .sandbox
+            .either
+
+        val partialBadCase =
+          ZManaged
+            .succeedNow(1)
+            .rejectM({ case v if v != 0 => ZManaged.fail("Partial failed!") })
+            .sandbox
+            .either
+            .map(_.left.map(_.failureOrCause))
+
+        val badCase =
+          ZManaged
+            .succeedNow(1)
+            .rejectM({ case v if v != 0 => ZManaged.fail("Partial failed!") })
+            .sandbox
+            .either
+            .map(_.left.map(_.failureOrCause))
+
+        for {
+          r1 <- goodCase.use(r => ZIO.succeedNow(assert(r)(isRight(equalTo(0)))))
+          r2 <- partialBadCase.use(r => ZIO.succeedNow(assert(r)(isLeft(isLeft(equalTo("Partial failed!"))))))
+          r3 <- badCase.use(r => ZIO.succeedNow(assert(r)(isLeft(isLeft(equalTo("Partial failed!"))))))
+        } yield r1 && r2 && r3
       }
     ),
     suite("retry")(

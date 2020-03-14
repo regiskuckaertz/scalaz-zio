@@ -11,6 +11,12 @@ object UIO {
     ZIO.absolve(v)
 
   /**
+   * @see See [[zio.ZIO.adopt]]
+   */
+  def adopt(fiber: Fiber[Any, Any]): UIO[Boolean] =
+    ZIO.adopt(fiber)
+
+  /**
    * @see See [[zio.ZIO.allowInterrupt]]
    */
   def allowInterrupt: UIO[Unit] =
@@ -160,7 +166,7 @@ object UIO {
   /**
    * @see See [[zio.ZIO.effectAsync]]
    */
-  def effectAsync[A](register: (UIO[A] => Unit) => Unit, blockingOn: List[Fiber.Id] = Nil): UIO[A] =
+  def effectAsync[A](register: (UIO[A] => Unit) => Any, blockingOn: List[Fiber.Id] = Nil): UIO[A] =
     ZIO.effectAsync(register, blockingOn)
 
   /**
@@ -564,7 +570,7 @@ object UIO {
   /**
    * @see See [[zio.ZIO.when]]
    */
-  def when(b: => Boolean)(uio: UIO[Any]): UIO[Unit] =
+  def when(b: => Boolean)(uio: => UIO[Any]): UIO[Unit] =
     ZIO.when(b)(uio)
 
   /**
@@ -582,7 +588,7 @@ object UIO {
   /**
    * @see See [[zio.ZIO.whenM]]
    */
-  def whenM(b: UIO[Boolean])(uio: UIO[Any]): UIO[Unit] =
+  def whenM(b: UIO[Boolean])(uio: => UIO[Any]): UIO[Unit] =
     ZIO.whenM(b)(uio)
 
   /**

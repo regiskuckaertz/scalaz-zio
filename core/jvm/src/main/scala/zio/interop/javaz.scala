@@ -25,7 +25,7 @@ import zio._
 import zio.blocking.{ blocking, Blocking }
 
 private[zio] object javaz {
-  def effectAsyncWithCompletionHandler[T](op: CompletionHandler[T, Any] => Unit): Task[T] =
+  def effectAsyncWithCompletionHandler[T](op: CompletionHandler[T, Any] => Any): Task[T] =
     Task.effectSuspendTotalWith[T] { (p, _) =>
       Task.effectAsync { k =>
         val handler = new CompletionHandler[T, Any] {
@@ -61,14 +61,15 @@ private[zio] object javaz {
       Task.succeedNow(f.get())
     } catch catchFromGet(isFatal)
 
-  def fromCompletionStage[A](cs: => CompletionStage[A]): Task[A] =
+  def fromCompletionStage[A](thunk: => CompletionStage[A]): Task[A] = {
+    lazy val cs: CompletionStage[A] = thunk
     Task.effectSuspendTotalWith { (p, _) =>
       val cf = cs.toCompletableFuture
       if (cf.isDone) {
         unwrapDone(p.fatal)(cf)
       } else {
         Task.effectAsync { cb =>
-          val _ = cs.handle[Unit] { (v: A, t: Throwable) =>
+          cs.handle[Unit] { (v: A, t: Throwable) =>
             val io = Option(t).fold[Task[A]](Task.succeed(v)) { t =>
               catchFromGet(p.fatal).lift(t).getOrElse(Task.die(t))
             }
@@ -77,6 +78,7 @@ private[zio] object javaz {
         }
       }
     }
+  }
 
   /** WARNING: this uses the blocking Future#get, consider using `fromCompletionStage` */
   def fromFutureJava[A](future: => Future[A]): RIO[Blocking, A] =

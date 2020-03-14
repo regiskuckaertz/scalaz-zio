@@ -87,7 +87,7 @@ final class ZSTM[-R, +E, +A] private[stm] (
    * second part to that effect.
    */
   def ***[R1, E1 >: E, B](that: ZSTM[R1, E1, B]): ZSTM[(R, R1), E1, (A, B)] =
-    (ZSTM.first[E1, R, R1] >>> self) &&& (ZSTM.second[E1, R, R1] >>> that)
+    (ZSTM.first[R, R1] >>> self) &&& (ZSTM.second[R, R1] >>> that)
 
   /**
    * Sequentially zips this value with the specified one, discarding the
@@ -372,11 +372,11 @@ final class ZSTM[-R, +E, +A] private[stm] (
   /**
    * Unwraps the optional success of this effect, but can fail with unit value.
    */
-  def get[E1 >: E, B](implicit ev1: E1 =:= Nothing, ev2: A <:< Option[B]): ZSTM[R, Unit, B] =
+  def get[B](implicit ev1: E <:< Nothing, ev2: A <:< Option[B]): ZSTM[R, Unit, B] =
     foldM(
       ev1,
       ev2(_).fold[ZSTM[R, Unit, B]](ZSTM.fail(()))(ZSTM.succeedNow(_))
-    )
+    )(CanFail)
 
   /**
    * Returns a successful effect with the head of the list if the list is
@@ -511,7 +511,7 @@ final class ZSTM[-R, +E, +A] private[stm] (
    * Translates `STM` effect failure into death of the fiber, making all failures unchecked and
    * not a part of the type of the effect.
    */
-  def orDie[E1 >: E](implicit ev1: E1 <:< Throwable, ev2: CanFail[E]): ZSTM[R, Nothing, A] =
+  def orDie(implicit ev1: E <:< Throwable, ev2: CanFail[E]): ZSTM[R, Nothing, A] =
     orDieWith(ev1)
 
   /**
@@ -622,7 +622,7 @@ final class ZSTM[-R, +E, +A] private[stm] (
    * Fail with the returned value if the `PartialFunction` matches, otherwise
    * continue with our held value.
    */
-  def reject[R1 <: R, E1 >: E](pf: PartialFunction[A, E1]): ZSTM[R1, E1, A] =
+  def reject[E1 >: E](pf: PartialFunction[A, E1]): ZSTM[R, E1, A] =
     rejectM(pf.andThen(ZSTM.fail(_)))
 
   /**
@@ -753,7 +753,7 @@ final class ZSTM[-R, +E, +A] private[stm] (
   /**
    * The moral equivalent of `if (p) exp`
    */
-  def when(b: Boolean): ZSTM[R, E, Unit] = ZSTM.when(b)(self)
+  def when(b: => Boolean): ZSTM[R, E, Unit] = ZSTM.when(b)(self)
 
   /**
    * The moral equivalent of `if (p) exp` when `p` has side-effects
@@ -941,7 +941,7 @@ object ZSTM {
    * Returns an effectful function that extracts out the first element of a
    * tuple.
    */
-  def first[E, A, B]: ZSTM[(A, B), E, A] =
+  def first[A, B]: ZSTM[(A, B), Nothing, A] =
     fromFunction[(A, B), A](_._1)
 
   /**
@@ -1206,7 +1206,7 @@ object ZSTM {
    * Returns an effectful function that extracts out the second element of a
    * tuple.
    */
-  def second[E, A, B]: ZSTM[(A, B), E, B] =
+  def second[A, B]: ZSTM[(A, B), Nothing, B] =
     fromFunction[(A, B), B](_._2)
 
   /**
@@ -1230,7 +1230,7 @@ object ZSTM {
   /**
    * Returns an effectful function that merely swaps the elements in a `Tuple2`.
    */
-  def swap[E, A, B]: ZSTM[(A, B), E, (B, A)] =
+  def swap[A, B]: ZSTM[(A, B), Nothing, (B, A)] =
     fromFunction[(A, B), (B, A)](_.swap)
 
   /**
@@ -1265,7 +1265,7 @@ object ZSTM {
   /**
    * The moral equivalent of `if (p) exp`
    */
-  def when[R, E](b: => Boolean)(stm: ZSTM[R, E, Any]): ZSTM[R, E, Unit] =
+  def when[R, E](b: => Boolean)(stm: => ZSTM[R, E, Any]): ZSTM[R, E, Unit] =
     suspend(if (b) stm.unit else unit)
 
   /**
@@ -1283,7 +1283,7 @@ object ZSTM {
   /**
    * The moral equivalent of `if (p) exp` when `p` has side-effects
    */
-  def whenM[R, E](b: ZSTM[R, E, Boolean])(stm: ZSTM[R, E, Any]): ZSTM[R, E, Unit] =
+  def whenM[R, E](b: ZSTM[R, E, Boolean])(stm: => ZSTM[R, E, Any]): ZSTM[R, E, Unit] =
     b.flatMap(b => if (b) stm.unit else unit)
 
   private[zio] def succeedNow[A](a: A): STM[Nothing, A] =
@@ -1300,7 +1300,7 @@ object ZSTM {
   }
 
   final class IfM[R, E](private val b: ZSTM[R, E, Boolean]) {
-    def apply[R1 <: R, E1 >: E, A](onTrue: ZSTM[R1, E1, A], onFalse: ZSTM[R1, E1, A]): ZSTM[R1, E1, A] =
+    def apply[R1 <: R, E1 >: E, A](onTrue: => ZSTM[R1, E1, A], onFalse: => ZSTM[R1, E1, A]): ZSTM[R1, E1, A] =
       b.flatMap(b => if (b) onTrue else onFalse)
   }
 
@@ -1321,12 +1321,12 @@ object ZSTM {
     type Journal =
       MutableMap[TRef[_], ZSTM.internal.Entry]
 
-    type Todo = () => Unit
+    type Todo = () => Any
 
     /**
      * Creates a function that can reset the journal.
      */
-    def prepareResetJournal(journal: Journal): () => Unit = {
+    def prepareResetJournal(journal: Journal): () => Any = {
       val saved = new MutableMap[TRef[_], Entry](journal.size)
 
       val it = journal.entrySet.iterator
@@ -1507,9 +1507,9 @@ object ZSTM {
       done: AtomicBoolean,
       r: R
     )(
-      k: ZIO[R, E, A] => Unit
+      k: ZIO[R, E, A] => Any
     ): Unit = {
-      def complete(io: IO[E, A]): Unit = { done.set(true); k(io) }
+      def complete(io: IO[E, A]): Unit = { done.set(true); k(io); () }
 
       @tailrec
       def suspend(accum: Journal, journal: Journal): Unit = {

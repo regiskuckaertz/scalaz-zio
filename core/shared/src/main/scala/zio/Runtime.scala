@@ -88,7 +88,7 @@ trait Runtime[+R] {
    *
    * This method is effectful and should only be invoked at the edges of your program.
    */
-  final def unsafeRunAsync[E, A](zio: => ZIO[R, E, A])(k: Exit[E, A] => Unit): Unit = {
+  final def unsafeRunAsync[E, A](zio: => ZIO[R, E, A])(k: Exit[E, A] => Any): Unit = {
     val InitialInterruptStatus = InterruptStatus.Interruptible
 
     val fiberId = Fiber.newFiberId()
@@ -108,6 +108,8 @@ trait Runtime[+R] {
 
     context.evaluateNow(ZIOFn.recordStackTrace(() => zio)(zio.asInstanceOf[IO[E, A]]))
     context.runAsync(k)
+
+    ()
   }
 
   /**
@@ -240,7 +242,7 @@ object Runtime {
    * [[ZIO.provideLayer]] directly in their application entry points.
    */
   def unsafeFromLayer[R <: Has[_]](
-    layer: ZLayer.NoDeps[Any, R],
+    layer: Layer[Any, R],
     platform: Platform = Platform.default
   ): Runtime.Managed[R] = {
     val runtime = Runtime((), platform)

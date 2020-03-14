@@ -88,7 +88,7 @@ object BuildHelper {
       (if (isDotty.value) Seq()
        else
          Seq(
-           "dev.zio" %%% "izumi-reflect" % "0.11.0-M1"
+           "dev.zio" %%% "izumi-reflect" % "0.12.0-M0"
          ))
   )
 
@@ -249,7 +249,8 @@ object BuildHelper {
             Seq(file(sourceDirectory.value.getPath + "/main/scala-2.12+")),
             CrossType.Full.sharedSrcDir(baseDirectory.value, "main").toList.map(f => file(f.getPath + "-2.12+")),
             CrossType.Full.sharedSrcDir(baseDirectory.value, "test").toList.map(f => file(f.getPath + "-2.12+")),
-            CrossType.Full.sharedSrcDir(baseDirectory.value, "main").toList.map(f => file(f.getPath + "-2.x"))
+            CrossType.Full.sharedSrcDir(baseDirectory.value, "main").toList.map(f => file(f.getPath + "-2.x")),
+            CrossType.Full.sharedSrcDir(baseDirectory.value, "main").toList.map(f => file(f.getPath + "-2.12-2.13"))
           ).flatten
         case _ =>
           if (isDotty.value)
@@ -291,7 +292,7 @@ object BuildHelper {
     }
   )
 
-  def macroSettings = Seq(
+  def macroExpansionSettings = Seq(
     scalacOptions ++= {
       CrossVersion.partialVersion(scalaVersion.value) match {
         case Some((2, 13)) => Seq("-Ymacro-annotations")
@@ -305,6 +306,23 @@ object BuildHelper {
         case _ => Seq.empty
       }
     }
+  )
+
+  def macroDefinitionSettings = Seq(
+    scalacOptions += "-language:experimental.macros",
+    libraryDependencies ++=
+      Seq("org.portable-scala" %%% "portable-scala-reflect" % "1.0.0") ++ {
+        if (isDotty.value) Seq()
+        else
+          Seq(
+            "org.scala-lang" % "scala-reflect"  % scalaVersion.value % "provided",
+            "org.scala-lang" % "scala-compiler" % scalaVersion.value % "provided"
+          )
+      }
+  )
+
+  def testJsSettings = Seq(
+    libraryDependencies += "io.github.cquiroz" %%% "scala-java-time" % "2.0.0-RC5" % Test
   )
 
   def welcomeMessage = onLoadMessage := {

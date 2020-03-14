@@ -59,7 +59,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
    * second part to that effect.
    */
   def ***[R1, E1 >: E, B](that: ZManaged[R1, E1, B]): ZManaged[(R, R1), E1, (A, B)] =
-    (ZManaged.first[E1, R, R1] >>> self) &&& (ZManaged.second[E1, R, R1] >>> that)
+    (ZManaged.first[R, R1] >>> self) &&& (ZManaged.second[R, R1] >>> that)
 
   /**
    * Symbolic alias for zipRight
@@ -441,8 +441,8 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   /**
    * Unwraps the optional success of this effect, but can fail with unit value.
    */
-  def get[E1 >: E, B](implicit ev1: E1 =:= Nothing, ev2: A <:< Option[B]): ZManaged[R, Unit, B] =
-    ZManaged.absolve(mapError(ev1).map(ev2(_).toRight(())))
+  def get[B](implicit ev1: E <:< Nothing, ev2: A <:< Option[B]): ZManaged[R, Unit, B] =
+    ZManaged.absolve(mapError(ev1)(CanFail).map(ev2(_).toRight(())))
 
   /**
    * Depending on the environment execute this or the other effect
@@ -479,30 +479,23 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   def mapErrorCause[E1](f: Cause[E] => Cause[E1]): ZManaged[R, E1, A] =
     ZManaged(reserve.mapErrorCause(f).map(r => Reservation(r.acquire.mapErrorCause(f), r.release)))
 
-  def memoize: ZManaged[R, Nothing, ZManaged[Any, E, A]] =
-    ZManaged {
-      ZIO.accessM[R] { r =>
-        RefM.make[Option[(Reservation[Any, E, A], Exit[E, A])]](None).map { ref =>
-          val acquire1: ZIO[Any, E, A] =
-            ref.modify {
-              case v @ Some((_, e)) => ZIO.succeedNow(e -> v)
-              case None =>
-                ZIO.uninterruptibleMask { restore =>
-                  self.provide(r).reserve.flatMap(res => restore(res.acquire).run.map(e => e -> Some(res -> e)))
-                }
-            }.flatMap(ZIO.done(_))
-
-          val acquire2: ZIO[R, Nothing, ZManaged[Any, E, A]] =
-            ZIO.succeedNow(acquire1.toManaged_)
-
-          val release2 = (_: Exit[_, _]) =>
-            ref.updateSome {
-              case Some((res, e)) => res.release(e).as(None)
-            }
-
-          Reservation(acquire2, release2)
-        }
-      }
+  def memoize: ZManaged[Any, Nothing, ZManaged[R, E, A]] =
+    ZManaged.finalizerRef(_ => UIO.unit).mapM { finalizers =>
+      for {
+        promise <- Promise.make[E, A]
+        complete <- ZIO.uninterruptibleMask { restore =>
+                     ZIO.accessM[R] { r =>
+                       self
+                         .provide(r)
+                         .reserve
+                         .flatMap {
+                           case Reservation(acquire, release) =>
+                             restore(acquire).ensuring(finalizers.add(release))
+                         }
+                         .to(promise)
+                     }
+                   }.once
+      } yield (complete *> promise.await).toManaged_
     }
 
   /**
@@ -719,6 +712,24 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
     catchAll(e => pf.lift(e).fold[ZManaged[R, E1, A]](ZManaged.die(f(e)))(ZManaged.fail(_)))
 
   /**
+   * Fail with the returned value if the `PartialFunction` matches, otherwise
+   * continue with our held value.
+   */
+  def reject[E1 >: E](pf: PartialFunction[A, E1]): ZManaged[R, E1, A] =
+    rejectM(pf.andThen(ZManaged.fail(_)))
+
+  /**
+   * Continue with the returned computation if the `PartialFunction` matches,
+   * translating the successful match into a failure, otherwise continue with
+   * our held value.
+   */
+  def rejectM[R1 <: R, E1 >: E](pf: PartialFunction[A, ZManaged[R1, E1, E1]]): ZManaged[R1, E1, A] =
+    self.flatMap { v =>
+      pf.andThen[ZManaged[R1, E1, A]](_.flatMap(ZManaged.fail(_)))
+        .applyOrElse[A, ZManaged[R1, E1, A]](v, ZManaged.succeedNow)
+    }
+
+  /**
    * Retries with the specified retry policy.
    * Retries are done following the failure of the original `io` (up to a fixed maximum with
    * `once` or `recurs` for example), so that that `io.retry(Schedule.once)` means
@@ -926,7 +937,7 @@ final class ZManaged[-R, +E, +A] private (reservation: ZIO[R, E, Reservation[R, 
   /**
    * The moral equivalent of `if (p) exp`
    */
-  def when(b: Boolean): ZManaged[R, E, Unit] =
+  def when(b: => Boolean): ZManaged[R, E, Unit] =
     ZManaged.when(b)(self)
 
   /**
@@ -1200,7 +1211,10 @@ object ZManaged {
   }
 
   final class IfM[R, E](private val b: ZManaged[R, E, Boolean]) extends AnyVal {
-    def apply[R1 <: R, E1 >: E, A](onTrue: ZManaged[R1, E1, A], onFalse: ZManaged[R1, E1, A]): ZManaged[R1, E1, A] =
+    def apply[R1 <: R, E1 >: E, A](
+      onTrue: => ZManaged[R1, E1, A],
+      onFalse: => ZManaged[R1, E1, A]
+    ): ZManaged[R1, E1, A] =
       b.flatMap(b => if (b) onTrue else onFalse)
   }
 
@@ -1355,7 +1369,7 @@ object ZManaged {
    * Returns an effectful function that extracts out the first element of a
    * tuple.
    */
-  def first[E, A, B]: ZManaged[(A, B), E, A] = fromFunction(_._1)
+  def first[A, B]: ZManaged[(A, B), Nothing, A] = fromFunction(_._1)
 
   /**
    * Returns an effect that performs the outer effect first, followed by the
@@ -1899,7 +1913,7 @@ object ZManaged {
    * Returns an effectful function that extracts out the second element of a
    * tuple.
    */
-  def second[E, A, B]: ZManaged[(A, B), E, B] = fromFunction(_._2)
+  def second[A, B]: ZManaged[(A, B), Nothing, B] = fromFunction(_._2)
 
   /**
    * Lifts a lazy, pure value into a Managed.
@@ -1916,7 +1930,7 @@ object ZManaged {
   /**
    * Returns an effectful function that merely swaps the elements in a `Tuple2`.
    */
-  def swap[E, A, B]: ZManaged[(A, B), E, (B, A)] = fromFunction(_.swap)
+  def swap[A, B]: ZManaged[(A, B), Nothing, (B, A)] = fromFunction(_.swap)
 
   /**
    * Returns a ZManaged value that represents a managed resource that can be safely
@@ -1987,8 +2001,8 @@ object ZManaged {
   /**
    * The moral equivalent of `if (p) exp`
    */
-  def when[R, E](b: => Boolean)(zManaged: ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
-    if (b) zManaged.unit else unit
+  def when[R, E](b: => Boolean)(zManaged: => ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
+    ZManaged.suspend(if (b) zManaged.unit else unit)
 
   /**
    * Runs an effect when the supplied `PartialFunction` matches for the given value, otherwise does nothing.
@@ -2007,7 +2021,7 @@ object ZManaged {
   /**
    * The moral equivalent of `if (p) exp` when `p` has side-effects
    */
-  def whenM[R, E](b: ZManaged[R, E, Boolean])(zManaged: ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
+  def whenM[R, E](b: ZManaged[R, E, Boolean])(zManaged: => ZManaged[R, E, Any]): ZManaged[R, E, Unit] =
     b.flatMap(b => if (b) zManaged.unit else unit)
 
   private[zio] def succeedNow[A](r: A): ZManaged[Any, Nothing, A] =
