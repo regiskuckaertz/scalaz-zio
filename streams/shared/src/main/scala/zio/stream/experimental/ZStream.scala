@@ -8,6 +8,7 @@ abstract class ZStream[-R, +E, +O](
 ) extends ZConduit[R, E, Unit, O, Unit](
       process.map(pull => _ => pull.mapError(_.fold[Either[E, Unit]](Right(()))(Left(_))))
     ) { self =>
+  import ZStream.Pull
 
   /**
    * Symbolic alias for [[ZStream#cross]].
@@ -557,16 +558,20 @@ abstract class ZStream[-R, +E, +O](
   def runManaged[R1 <: R, E1 >: E, O1 >: O, B](sink: ZSink[R1, E1, O1, B]): ZManaged[R1, E1, B] =
     for {
       pull <- self.process
-      push <- sink.run
+      push <- sink.push
       run = {
         def go: ZIO[R1, E1, B] =
           pull.foldM(
-            _.fold(
-              IO.fail,
-              _ =>
-                push(None).foldM(_.fold(IO.fail, IO.succeedNow), _ => IO.dieMessage("This is not possible"))
-            ),
-            os => push(Some(os)).catchAll(_.fold(IO.fail, _ => IO.dieMessage("This is not possible"))) *> go
+            _ =>
+              push(None).foldCauseM(
+                Cause.sequenceCauseEither(_).fold(IO.halt(_), IO.succeedNow),
+                _ => IO.dieMessage("empty stream / empty sink")
+              ),
+            os =>
+              push(Some(os)).foldCauseM(
+                Cause.sequenceCauseEither(_).fold(IO.halt(_), IO.succeedNow),
+                _ => go
+              )
           )
         go
       }
@@ -586,27 +591,15 @@ abstract class ZStream[-R, +E, +O](
         pull = counter.get.flatMap { c =>
           if (c >= n) Pull.end
           else as <* counter.set(c + 1)
+        }
+      } yield pull
+    }
+
   /*
    * Maps over elements of the stream with the specified effectful function.
    */
   def mapM[R1 <: R, E1 >: E, O2](f: O => ZIO[R1, E1, O2]): ZStream[R1, E1, O2] =
     ZStream(self.process.map(_.flatMap(_.mapM(f).mapError(Some(_)))))
-
-  /**
-   * Runs the stream and collects all of its elements to a list.
-   */
-  def runCollect: ZIO[R, E, List[O]] =
-    // TODO: rewrite as a sink
-    Ref.make[List[O]](List()).flatMap { ref =>
-      foreach(a => ref.update(a :: _)) *>
-        ref.get.map(_.reverse)
-    }
-
-  /**
-   * Runs the stream only for its effects. The emitted elements are discarded.
-   */
-  def runDrain: ZIO[R, E, Unit] =
-    foreach(_ => ZIO.unit)
 
   /**
    * Takes the specified number of elements from this stream.
@@ -850,11 +843,11 @@ abstract class ZStream[-R, +E, +O](
 
 object ZStream {
   private[zio] object Pull {
-    def emit[A](a: A): IO[Nothing, Chunk[A]]                  = UIO(Chunk.single(a))
-    def emit[A](as: Chunk[A]): IO[Nothing, Chunk[A]]          = UIO(as)
-    def fail[E](e: E): IO[Either[E, Nothing], Nothing]        = IO.fail(Left(e))
-    def halt[E](c: Cause[E]): IO[Either[E, Nothing], Nothing] = IO.halt(c).mapError(Left(_))
-    val end: IO[Either[Nothing, Unit], Nothing]               = IO.fail(Right(()))
+    def emit[A](a: A): IO[Nothing, Chunk[A]]         = UIO(Chunk.single(a))
+    def emit[A](as: Chunk[A]): IO[Nothing, Chunk[A]] = UIO(as)
+    def fail[E](e: E): IO[Option[E], Nothing]        = IO.fail(Some(e))
+    def halt[E](c: Cause[E]): IO[Option[E], Nothing] = IO.halt(c).mapError(Some(_))
+    val end: IO[Option[Nothing], Nothing]            = IO.fail(None)
   }
 
   def apply[R, E, O](
@@ -1167,7 +1160,7 @@ object ZStream {
   def range(min: Int, max: Int): UStream[Int] =
     iterate(min)(_ + 1).takeWhile(_ < max)
 
-    /**
+  /**
    * Creates a stream from an effect producing a value of type `A` which repeats forever
    */
   def repeatEffect[R, E, A](fa: ZIO[R, E, A]): ZStream[R, E, A] =

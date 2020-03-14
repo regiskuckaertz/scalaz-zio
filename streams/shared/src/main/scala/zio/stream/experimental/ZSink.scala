@@ -37,7 +37,7 @@ object ZSink {
     fold(0L)((s, _) => s + 1)
 
   val drain: ZSink[Any, Nothing, Any, Nothing] =
-    ZSink(Managed.succeedNow(_ => UIO(Chunk.unit)))
+    ZSink(Managed.succeedNow(_ => UIO.unit))
 
   def fromPush[R, E, I, Z](push: Option[Chunk[I]] => ZIO[R, Either[E, Z], Unit]): ZSink[R, E, I, Z] =
     ZSink(Managed.succeed(push))
