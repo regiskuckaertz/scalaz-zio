@@ -172,49 +172,32 @@ abstract class ZStream[-R, +E, +O](
   ): ZStream[R1, E1, Either[Q, P]] =
     ZStream {
       for {
-        pull        <- self.process
-        flushPermit <- Semaphore.make(1).toManaged_
-        push        <- transducer.push.map(push => (is: Option[Chunk[O]]) => UIO(println(s"pushing $is")) *> flushPermit.withPermit(push(is)))
-        handoff     <- ZStream.Handoff.make[Take[E1, P]].toManaged_
-        done        <- ZRef.makeManaged(false)
+        pull         <- self.process
+        push         <- transducer.push
+        handoff      <- ZStream.Handoff.make[Take[E1, O]].toManaged_
+        raceNextTime <- ZRef.makeManaged(false)
+        waitingFiber <- ZRef.makeManaged[Option[Fiber[Nothing, Take[E1, O]]]](None)
         scheduleState <- schedule.initial
                           .flatMap(i => ZRef.make[(Chunk[P], schedule.State)](Chunk.empty -> i))
                           .toManaged_
-        producer = {
-          // Upstream is done, we need to flush the transducer. If the output is
-          // empty, we send the end signal downstream.
-          def finish(ps: Chunk[P]): URIO[R1, Boolean] =
-            (if (ps.isEmpty) handoff.offer(Take.End)
-             else handoff.offer(Exit.succeed(ps)) *> handoff.offer(Take.End)) as false
-
-          // If the transducer emitted a frame, it is submitted downstream. This will block until the frame
-          // is consumed, but otherwise resumes waiting for the next instruction.
-          def iterate(ps: Chunk[P]): UIO[Boolean] =
-            handoff.offer(Exit.succeed(ps)).as(true)
-
-          def iterateFail(c: Cause[E1]): UIO[Boolean] =
-            handoff.offer(Exit.halt(c.map(Some(_)))).as(true)
-
-          // We read the command from upstream (either flush the transducer of pull upstream) and submit
-          // the relevant result downstream
-          lazy val go: URIO[R1, Boolean] =
-            pull.foldCauseM(
-              Cause
-                .sequenceCauseOption(_)
-                .fold(push(None).foldCauseM(iterateFail, finish))(iterateFail),
-              os => push(Some(os)).foldCauseM(iterateFail, iterate)
-            )
-
-          go.repeat(Schedule.doWhile(identity))
-        }
+        producer = pull.run
+          .flatMap(take =>
+            handoff
+              .offer(take)
+              .as(take.fold(!_.failures.contains(None), _ => true))
+          )
+          .doWhile(identity)
         consumer = {
           // Advances the state of the schedule, which may or may not terminate
           val updateSchedule: URIO[R1, Option[schedule.State]] =
             scheduleState.get.flatMap(state => schedule.update(state._1, state._2).option)
 
           // Waiting for the normal output of the producer
-          val waitForProducer: ZIO[R1, Nothing, Take[E1, P]] =
-            handoff.take
+          val waitForProducer: ZIO[R1, Nothing, Take[E1, O]] =
+            waitingFiber.getAndSet(None).flatMap {
+              case None      => handoff.take
+              case Some(fib) => fib.join
+            }
 
           def updateLastChunk(take: Exit[_, Chunk[P]]): UIO[Unit] =
             take match {
@@ -222,30 +205,55 @@ abstract class ZStream[-R, +E, +O](
               case _                   => ZIO.unit
             }
 
-          def go(race: Boolean): ZIO[R1, Option[E1], Chunk[Take[E1, Either[Q, P]]]] =
-            updateSchedule.raceEither(waitForProducer).flatMap {
-              case Left(None) =>
-                for {
-                  init           <- schedule.initial
-                  state          <- scheduleState.getAndSet(Chunk.empty -> init)
-                  scheduleResult = Exit.succeed(Chunk.single(Left(schedule.extract(state._1, state._2))))
-                  ps             <- push(None).run.tap(updateLastChunk)
-                } yield Chunk(scheduleResult, ps.bimap(Some(_), _.map(Right(_))))
-              case Left(Some(nextState)) =>
-                for {
-                  _  <- scheduleState.update(_.copy(_2 = nextState))
-                  ps <- push(None).run.tap(updateLastChunk)
-                } yield Chunk.single(ps.bimap(Some(_), _.map(Right(_))))
-              case Right(ps) =>
-                updateLastChunk(ps).as(Chunk.single(ps.map(_.map(Right(_)))))
-            }
+          def handleTake(take: Take[E1, O]) = {
+            take
+              .foldM(
+                Cause.sequenceCauseOption(_) match {
+                  case None =>
+                    push(None).map(ps => Chunk(Exit.succeed(ps.map(Right(_))), Exit.fail(None)))
+                  case Some(cause) => ZIO.halt(cause)
+                },
+                os =>
+                  push(Some(os))
+                    .flatMap(ps => updateLastChunk(Exit.succeed(ps)).as(Chunk.single(Exit.succeed(ps.map(Right(_))))))
+              )
+              .mapError(Some(_))
+          }
 
-          done.get.flatMap(if (_) Pull.end else go)
+          def go(race: Boolean): ZIO[R1, Option[E1], Chunk[Take[E1, Either[Q, P]]]] =
+            if (!race)
+              waitForProducer.flatMap(handleTake) <* raceNextTime.set(true)
+            else
+              updateSchedule.raceWith(waitForProducer)(
+                (scheduleDone, producerWaiting) =>
+                  ZIO.done(scheduleDone).flatMap {
+                    case None =>
+                      for {
+                        init           <- schedule.initial
+                        state          <- scheduleState.getAndSet(Chunk.empty -> init)
+                        scheduleResult = Exit.succeed(Chunk.single(Left(schedule.extract(state._1, state._2))))
+                        ps             <- push(None).run.tap(updateLastChunk)
+                        _              <- raceNextTime.set(false)
+                        _              <- waitingFiber.set(Some(producerWaiting))
+                      } yield Chunk(scheduleResult, ps.bimap(Some(_), _.map(Right(_))))
+                    case Some(nextState) =>
+                      for {
+                        _  <- scheduleState.update(_.copy(_2 = nextState))
+                        ps <- push(None).run.tap(updateLastChunk)
+                        _  <- raceNextTime.set(false)
+                        _  <- waitingFiber.set(Some(producerWaiting))
+                      } yield Chunk.single(ps.bimap(Some(_), _.map(Right(_))))
+                  },
+                (producerDone, scheduleWaiting) => scheduleWaiting.interrupt *> handleTake(producerDone.flatten)
+              )
+
+          raceNextTime.get.flatMap(go)
+
         }
 
         _ <- producer.forkManaged
       } yield consumer
-    }.unExitChunk
+    }.collectWhileSuccess.flattenChunks
 
   /**
    * Maps the success values of this stream to the specified constant value.
@@ -560,6 +568,35 @@ abstract class ZStream[-R, +E, +O](
               remaining <- chunk.collectWhileM(pf).mapError(Some(_))
               _         <- done.set(true).when(remaining.length < chunk.length)
             } yield remaining
+        }
+      } yield pull
+    }
+
+  def collectWhileSuccess[E1 >: E, O1](implicit ev: O <:< Exit[Option[E1], O1]): ZStream[R, E1, O1] =
+    ZStream {
+      for {
+        upstream <- self.process.mapM(BufferedPull.make(_))
+        done     <- Ref.make(false).toManaged_
+        pull = done.get.flatMap {
+          if (_) Pull.end
+          else
+            upstream.pullElement
+              .foldM(
+                {
+                  case None    => done.set(true) *> Pull.end
+                  case Some(e) => Pull.fail(e)
+                },
+                os =>
+                  ZIO
+                    .done(ev(os))
+                    .foldM(
+                      {
+                        case None    => done.set(true) *> Pull.end
+                        case Some(e) => Pull.fail(e)
+                      },
+                      Pull.emit(_)
+                    )
+              )
         }
       } yield pull
     }
@@ -1278,6 +1315,9 @@ abstract class ZStream[-R, +E, +O](
    * strict order of all the streams.
    */
   def flatten[R1 <: R, E1 >: E, O1](implicit ev: O <:< ZStream[R1, E1, O1]) = flatMap(ev(_))
+
+  def flattenChunks[O1](implicit ev: O <:< Chunk[O1]): ZStream[R, E, O1] =
+    mapConcatChunk(ev)
 
   /**
    * Flattens a stream of streams into a stream by executing a non-deterministic
