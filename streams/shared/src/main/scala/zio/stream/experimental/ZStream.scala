@@ -172,12 +172,11 @@ abstract class ZStream[-R, +E, +O](
   ): ZStream[R1, E1, Either[Q, P]] =
     ZStream {
       for {
-        pull     <- self.process
-        push     <- transducer.push
-        results  <- ZQueue.bounded[Take[E1, P]](1).toManaged(_.shutdown)
-        commands <- ZQueue.bounded[Boolean](1).toManaged(_.shutdown)
-        done     <- ZRef.makeManaged(false)
-        start    <- Promise.make[Nothing, Unit].toManaged_
+        pull        <- self.process
+        flushPermit <- Semaphore.make(1).toManaged_
+        push        <- transducer.push.map(push => (is: Option[Chunk[O]]) => UIO(println(s"pushing $is")) *> flushPermit.withPermit(push(is)))
+        handoff     <- ZStream.Handoff.make[Take[E1, P]].toManaged_
+        done        <- ZRef.makeManaged(false)
         scheduleState <- schedule.initial
                           .flatMap(i => ZRef.make[(Chunk[P], schedule.State)](Chunk.empty -> i))
                           .toManaged_
@@ -185,82 +184,68 @@ abstract class ZStream[-R, +E, +O](
           // Upstream is done, we need to flush the transducer. If the output is
           // empty, we send the end signal downstream.
           def finish(ps: Chunk[P]): URIO[R1, Boolean] =
-            results.offerAll(if (ps.isEmpty) List(Take.End) else List(Exit.succeed(ps), Take.End)) as false
+            (if (ps.isEmpty) handoff.offer(Take.End)
+             else handoff.offer(Exit.succeed(ps)) *> handoff.offer(Take.End)) as false
 
           // If the transducer emitted a frame, it is submitted downstream. This will block until the frame
           // is consumed, but otherwise resumes waiting for the next instruction.
-          def iterate(ps: Chunk[P]): URIO[R1, Boolean] =
-            results.offer(Exit.succeed(ps))
+          def iterate(ps: Chunk[P]): UIO[Boolean] =
+            handoff.offer(Exit.succeed(ps)).as(true)
 
-          def iterateFail(c: Cause[E1]): URIO[R1, Boolean] =
-            results.offer(Exit.halt(c.map(Some(_))))
-
-          // We push a command to the transducer, calling the continuation when it is done.
-          def drain(
-            os: Option[Chunk[O]]
-          )(onFailure: Cause[E1] => URIO[R1, Boolean], onSuccess: Chunk[P] => URIO[R1, Boolean]): URIO[R1, Boolean] =
-            push(os).foldCauseM(onFailure, onSuccess)
+          def iterateFail(c: Cause[E1]): UIO[Boolean] =
+            handoff.offer(Exit.halt(c.map(Some(_)))).as(true)
 
           // We read the command from upstream (either flush the transducer of pull upstream) and submit
           // the relevant result downstream
           lazy val go: URIO[R1, Boolean] =
-            commands.take.flatMap {
-              if (_)
-                drain(None)(iterateFail, ps => if (ps.isEmpty) finish(ps) else iterate(ps))
-              else
-                pull.foldCauseM(
-                  Cause
-                    .sequenceCauseOption(_)
-                    .fold(drain(None)(iterateFail, finish))(iterateFail),
-                  os => drain(Some(os))(iterateFail, iterate)
-                )
-            } <* start.succeed(())
+            pull.foldCauseM(
+              Cause
+                .sequenceCauseOption(_)
+                .fold(push(None).foldCauseM(iterateFail, finish))(iterateFail),
+              os => push(Some(os)).foldCauseM(iterateFail, iterate)
+            )
 
           go.repeat(Schedule.doWhile(identity))
         }
         consumer = {
-          def handleTake(take: Take[E1, P]): ZIO[R1, Option[E1], Chunk[Either[Q, P]]] =
-            done.set(true).when(take == Take.End) *> Pull
-              .fromTake(take)
-              .map(_.map(Right(_)))
-
           // Advances the state of the schedule, which may or may not terminate
           val updateSchedule: URIO[R1, Option[schedule.State]] =
             scheduleState.get.flatMap(state => schedule.update(state._1, state._2).option)
 
           // Waiting for the normal output of the producer
           val waitForProducer: ZIO[R1, Nothing, Take[E1, P]] =
-            results.take
+            handoff.take
 
-          def go(race: Boolean): ZIO[R1, Option[E1], Chunk[Either[Q, P]]] =
-            if (race)
-              commands.offer(false) *> start.await *> (updateSchedule raceEither waitForProducer).flatMap {
-                // Schedule is done, we reset it and yield its output downstream
-                case Left(None) =>
-                  for {
-                    init  <- schedule.initial
-                    state <- scheduleState.getAndSet(Chunk.empty -> init)
-                  } yield Chunk.single(Left(schedule.extract(state._1, state._2)))
+          def updateLastChunk(take: Exit[_, Chunk[P]]): UIO[Unit] =
+            take match {
+              case Exit.Success(chunk) => scheduleState.update(_.copy(_1 = chunk))
+              case _                   => ZIO.unit
+            }
 
-                // Schedule has made progress, we poll upstream and if there is data, we
-                case Left(Some(nextState)) =>
-                  commands.offer(true) *> scheduleState.update(_.copy(_2 = nextState)) *> go(false)
+          def go(race: Boolean): ZIO[R1, Option[E1], Chunk[Take[E1, Either[Q, P]]]] =
+            updateSchedule.raceEither(waitForProducer).flatMap {
+              case Left(None) =>
+                for {
+                  init           <- schedule.initial
+                  state          <- scheduleState.getAndSet(Chunk.empty -> init)
+                  scheduleResult = Exit.succeed(Chunk.single(Left(schedule.extract(state._1, state._2))))
+                  ps             <- push(None).run.tap(updateLastChunk)
+                } yield Chunk(scheduleResult, ps.bimap(Some(_), _.map(Right(_))))
+              case Left(Some(nextState)) =>
+                for {
+                  _  <- scheduleState.update(_.copy(_2 = nextState))
+                  ps <- push(None).run.tap(updateLastChunk)
+                } yield Chunk.single(ps.bimap(Some(_), _.map(Right(_))))
+              case Right(ps) =>
+                updateLastChunk(ps).as(Chunk.single(ps.map(_.map(Right(_)))))
+            }
 
-                case Right(take) if take.exists(_.isEmpty) =>
-                  go(true)
-
-                case Right(take) =>
-                  handleTake(take)
-              }
-            else
-              results.take.flatMap(take => if (take.exists(_.isEmpty)) go(true) else handleTake(take))
-
-          done.get.flatMap(if (_) Pull.end else go(true))
+          done.get.flatMap(if (_) Pull.end else go)
         }
 
         _ <- producer.forkManaged
       } yield consumer
-    }
+    }.unExitChunk
 
   /**
    * Maps the success values of this stream to the specified constant value.
@@ -3106,5 +3091,42 @@ object ZStream extends ZStreamPlatformSpecificConstructors {
         done   <- Ref.make(false)
         cursor <- Ref.make[(Chunk[A], Int)](Chunk.empty -> 0)
       } yield BufferedPull(pull, done, cursor)
+  }
+
+  /**
+   * A synchronous queue-like abstraction that allows a producer to offer
+   * an element and wait for it to be taken, and allows a consumer to wait
+   * for an element to be available.
+   */
+  class Handoff[A](ref: Ref[Handoff.State[A]]) {
+    def offer(a: A): UIO[Unit] =
+      Promise.make[Nothing, Unit].flatMap { p =>
+        ref.modify {
+          case s @ Handoff.State.Full(_, notifyProducer) => (notifyProducer.await *> offer(a), s)
+          case Handoff.State.Empty(notifyConsumer)       => (notifyConsumer.succeed(()) *> p.await, Handoff.State.Full(a, p))
+        }.flatten
+      }
+
+    def take: UIO[A] =
+      Promise.make[Nothing, Unit].flatMap { p =>
+        ref.modify {
+          case Handoff.State.Full(a, notifyProducer)   => (notifyProducer.succeed(()).as(a), Handoff.State.Empty(p))
+          case s @ Handoff.State.Empty(notifyConsumer) => (notifyConsumer.await *> take, s)
+        }.flatten
+      }
+  }
+
+  object Handoff {
+    def make[A]: UIO[Handoff[A]] =
+      Promise
+        .make[Nothing, Unit]
+        .flatMap(p => Ref.make[State[A]](State.Empty(p)))
+        .map(new Handoff(_))
+
+    sealed trait State[+A]
+    object State {
+      case class Empty(notifyConsumer: Promise[Nothing, Unit])          extends State[Nothing]
+      case class Full[+A](a: A, notifyProducer: Promise[Nothing, Unit]) extends State[A]
+    }
   }
 }
